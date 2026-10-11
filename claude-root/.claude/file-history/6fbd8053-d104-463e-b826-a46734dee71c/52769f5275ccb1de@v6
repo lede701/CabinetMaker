@@ -1,0 +1,50 @@
+using CabinetMaker.BRL.Extensions;
+using CabinetMaker.BRL.Services;
+using CabinetMaker.DAL.Extensions;
+using CabinetMaker.Domain.Shared.Settings;
+using CabinetMaker.Web.Components;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+
+builder.Services.Configure<CmSettings>(builder.Configuration.GetSection(CmSettings.Key));
+CmSettings settings = new CmSettings();
+builder.Configuration.GetSection(CmSettings.Key).Bind(settings);
+
+builder.Services.AddDataLayer(config =>
+{
+    config.DatabaseProvider = settings.DatabaseProvider;
+    config.DatabaseConnectionString = settings.ConnectionStrings.DefaultConnection;
+}).AddBusinessLayer(config =>
+{
+    config.AdminEmail = settings.Seed.AdminEmail;
+    config.AdminPassword = settings.Seed.AdminPassword;
+    config.AdminDisplayName = settings.Seed.AdminDisplayName;
+});
+
+var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
+    await seeder.SeedAsync();
+}
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error", createScopeForErrors: true);
+    app.UseHsts();
+}
+
+app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseAntiforgery();
+app.MapStaticAssets();
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
+
+app.Run();

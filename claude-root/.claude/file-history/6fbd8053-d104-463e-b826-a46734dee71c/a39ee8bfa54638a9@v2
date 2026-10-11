@@ -1,0 +1,29 @@
+using CabinetMaker.Domain.Entities;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Identity;
+
+namespace CabinetMaker.Web.Components.Shared;
+
+public partial class MfaReminder : ComponentBase
+{
+    private bool showReminder;
+
+    [Inject] private UserManager<User> UserManager { get; set; } = default!;
+    [Inject] private AuthenticationStateProvider AuthStateProvider { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        var principal = authState.User;
+
+        if (principal.Identity?.IsAuthenticated != true) return;
+
+        var user = await UserManager.GetUserAsync(principal);
+        if (user is null) return;
+
+        showReminder = !await UserManager.GetTwoFactorEnabledAsync(user);
+    }
+
+    private void Dismiss() => showReminder = false;
+}

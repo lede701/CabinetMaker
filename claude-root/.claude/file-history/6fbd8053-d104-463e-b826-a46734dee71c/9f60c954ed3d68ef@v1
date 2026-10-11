@@ -1,0 +1,15 @@
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class CmMaterialAttribute
+{
+    [Key]
+    public int CmMaterialAttributreId { get; set; }
+    public int CmMaterialId { get; set; }
+    public int AttributeTypeId { get; set; }
+    public int? MeasurementId { get; set; }
+    public string? StringValue { get; set; }
+    public bool? BoolValue { get; set; }
+
+}

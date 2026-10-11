@@ -1,0 +1,18 @@
+using System.ComponentModel.DataAnnotations;
+using Microsoft.EntityFrameworkCore;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class TenantSettings : CmEntity
+{
+    [Key]
+    public int TenantSettingsId { get; set; }
+    public Guid TenantSettingsGuid { get; set; }
+    public int TenantId { get; set; }
+    [Precision(18, 2)]
+    public decimal ShopHourlyRate { get; set; } = 75.00m;
+    [Precision(18, 4)]
+    public decimal DefaultMarkupPercentage { get; set; } = 0.20m;
+    [Precision(18, 4)]
+    public decimal DefaultMarginPercentage { get; set; } = 0.15m;
+}

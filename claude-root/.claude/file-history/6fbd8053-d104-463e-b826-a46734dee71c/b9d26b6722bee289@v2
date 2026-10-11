@@ -1,0 +1,15 @@
+@page "/account/manage/disable-2fa"
+
+<PageTitle>Disable Two-Factor Authentication</PageTitle>
+
+<h3 class="mb-3">Disable Two-Factor Authentication</h3>
+<StatusMessage Message="@message" />
+
+<div class="alert alert-warning">
+    <strong>Warning:</strong> Disabling 2FA makes your account less secure. Only proceed if you intend to re-enroll with a new authenticator app.
+</div>
+
+<EditForm Model="this" method="post" OnValidSubmit="OnValidSubmitAsync" FormName="disable-2fa">
+    <button type="submit" class="btn btn-danger">Disable 2FA</button>
+    <a href="/account/manage/2fa" class="btn btn-outline-secondary ms-2">Cancel</a>
+</EditForm>

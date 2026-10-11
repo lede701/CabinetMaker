@@ -1,0 +1,24 @@
+using System.ComponentModel.DataAnnotations;
+using Microsoft.EntityFrameworkCore;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class JobEstimate : CmEntity, ITenantScoped
+{
+    [Key]
+    public int JobEstimateId { get; set; }
+    public Guid JobEstimateGuid { get; set; }
+    public int TenantId { get; set; }
+    public int JobId { get; set; }
+    public int EstimateStatusTypeId { get; set; }
+    public int? Version { get; set; }
+    public DateTime GeneratedAt { get; set; }
+    public DateTime? SentAt { get; set; }
+    [Precision(18, 2)]
+    public decimal ShopHourlyRate { get; set; }
+    [Precision(18, 4)]
+    public decimal MarkupPercentage { get; set; }
+    [Precision(18, 2)]
+    public decimal TotalCost { get; set; }
+    public string? Notes { get; set; }
+}

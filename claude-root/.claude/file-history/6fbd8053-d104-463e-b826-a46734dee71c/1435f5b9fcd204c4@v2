@@ -1,0 +1,17 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace CabinetMaker.DAL.Extensions;
+
+public static class DalServiceExtensions
+{
+    public static IServiceCollection AddDataLayer(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddSingleton(TimeProvider.System);
+        services.AddCabinetMakerDatabase(configuration);
+
+        return services;
+    }
+}

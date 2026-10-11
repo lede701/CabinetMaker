@@ -1,0 +1,118 @@
+using CabinetMaker.Domain.Entities;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+
+namespace CabinetMaker.DAL.Context;
+
+public class CmContext : IdentityDbContext<User, IdentityRole<int>, int>
+{
+    private readonly TimeProvider _time;
+
+    public CmContext(DbContextOptions<CmContext> options, TimeProvider time) : base(options)
+    {
+        _time = time;
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        ApplyUtcDateTimeConverters(modelBuilder);
+    }
+
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        StampAuditFields();
+        return await base.SaveChangesAsync(cancellationToken);
+    }
+
+    private void StampAuditFields()
+    {
+        var now = _time.GetUtcNow().DateTime;
+
+        foreach (var entry in ChangeTracker.Entries<CmEntity>())
+        {
+            if (entry.State == EntityState.Added)
+                entry.Entity.CreatedDate = now;
+
+            if (entry.State is EntityState.Added or EntityState.Modified)
+                entry.Entity.LastUpdatedDate = now;
+        }
+    }
+
+    private static void ApplyUtcDateTimeConverters(ModelBuilder modelBuilder)
+    {
+        var utcConverter = new ValueConverter<DateTime, DateTime>(
+            v => EnforceUtc(v),
+            v => DateTime.SpecifyKind(v, DateTimeKind.Utc)
+        );
+
+        var utcNullableConverter = new ValueConverter<DateTime?, DateTime?>(
+            v => EnforceUtcNullable(v),
+            v => v == null ? null : DateTime.SpecifyKind(v.Value, DateTimeKind.Utc)
+        );
+
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        foreach (var property in entityType.GetProperties())
+        {
+            if (property.ClrType == typeof(DateTime))
+                property.SetValueConverter(utcConverter);
+            else if (property.ClrType == typeof(DateTime?))
+                property.SetValueConverter(utcNullableConverter);
+        }
+    }
+
+    private static DateTime EnforceUtc(DateTime v) =>
+        v.Kind == DateTimeKind.Utc
+            ? v
+            : throw new InvalidOperationException($"Non-UTC DateTime written to database: {v}");
+
+    private static DateTime? EnforceUtcNullable(DateTime? v) =>
+        v is null || v.Value.Kind == DateTimeKind.Utc
+            ? v
+            : throw new InvalidOperationException($"Non-UTC DateTime written to database: {v}");
+
+    #region Database Entities
+
+    // Dictionary & Units
+    public DbSet<CmType> Types => Set<CmType>();
+    public DbSet<CmTypeClass> TypeClasses => Set<CmTypeClass>();
+    public DbSet<CmUnit> Units => Set<CmUnit>();
+    public DbSet<CmMeasurement> Measurements => Set<CmMeasurement>();
+
+    // Plans
+    public DbSet<Plan> Plans => Set<Plan>();
+    public DbSet<PlanDetail> PlanDetails => Set<PlanDetail>();
+    public DbSet<PlanAttribute> PlanAttributes => Set<PlanAttribute>();
+
+    // Identity & Tenancy
+    public DbSet<Tenant> Tenants => Set<Tenant>();
+    public DbSet<TenantSettings> TenantSettings => Set<TenantSettings>();
+    public DbSet<UserPreference> UserPreferences => Set<UserPreference>();
+
+    // Contacts
+    public DbSet<Contact> Contacts => Set<Contact>();
+    public DbSet<ContactMethod> ContactMethods => Set<ContactMethod>();
+    public DbSet<ContactNote> ContactNotes => Set<ContactNote>();
+
+    // Materials
+    public DbSet<CmMaterial> Materials => Set<CmMaterial>();
+    public DbSet<CmMaterialDetail> MaterialDetails => Set<CmMaterialDetail>();
+    public DbSet<CmMaterialAttribute> MaterialAttributes => Set<CmMaterialAttribute>();
+    public DbSet<MaterialTenantDetail> MaterialTenantDetails => Set<MaterialTenantDetail>();
+    public DbSet<MaterialTenantAttribute> MaterialTenantAttributes => Set<MaterialTenantAttribute>();
+
+    // Jobs & Assemblies
+    public DbSet<Job> Jobs => Set<Job>();
+    public DbSet<CmAssembly> Assemblies => Set<CmAssembly>();
+    public DbSet<Part> Parts => Set<Part>();
+    public DbSet<PartOperation> PartOperations => Set<PartOperation>();
+
+    // Estimates
+    public DbSet<JobEstimate> JobEstimates => Set<JobEstimate>();
+    public DbSet<JobEstimateLine> JobEstimateLines => Set<JobEstimateLine>();
+    public DbSet<TenantDiscountCode> DiscountCodes => Set<TenantDiscountCode>();
+
+    #endregion
+}

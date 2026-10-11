@@ -1,0 +1,20 @@
+using System.ComponentModel.DataAnnotations;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class Job : CmEntity, ITenantScoped
+{
+    [Key]
+    public int JobId { get; set; }
+    public Guid JobGuid { get; set; }
+    public int TenantId { get; set; }
+    [MaxLength(255)]
+    public string Name { get; set; } = string.Empty;
+    public int? ClientContactId { get; set; }
+    public int JobStatusTypeId { get; set; }
+    public DateTime? TargetDate { get; set; }
+    public string? Notes { get; set; }
+
+    public virtual ICollection<CmAssembly> Assemblies { get; set; } = [];
+    public virtual ICollection<JobEstimate> Estimates { get; set; } = [];
+}

@@ -1,0 +1,11 @@
+Build started at 5:45 AM...
+1>------ Build started: Project: CabinetMaker.Domain.Shared, Configuration: Debug Any CPU ------
+1>  CabinetMaker.Domain.Shared -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.Domain.Shared\bin\Debug\net10.0\CabinetMaker.Domain.Shared.dll
+2>------ Build started: Project: CabinetMaker.DAL, Configuration: Debug Any CPU ------
+2>C:\Data\Apps\CabinetMaker\src\CabinetMaker.DAL\Extensions\DalServiceExtensions.cs(24,18,24,54): error CS1061: 'IServiceCollection' does not contain a definition for 'AddIdentity' and no accessible extension method 'AddIdentity' accepting a first argument of type 'IServiceCollection' could be found (are you missing a using directive or an assembly reference?)
+2>C:\Data\Apps\CabinetMaker\src\CabinetMaker.DAL\Extensions\DalServiceExtensions.cs(37,18,37,44): error CS1061: 'IServiceCollection' does not contain a definition for 'ConfigureApplicationCookie' and no accessible extension method 'ConfigureApplicationCookie' accepting a first argument of type 'IServiceCollection' could be found (are you missing a using directive or an assembly reference?)
+3>------ Build started: Project: CabinetMaker.BRL, Configuration: Debug Any CPU ------
+3>  CabinetMaker.BRL -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.BRL\bin\Debug\net10.0\CabinetMaker.BRL.dll
+4>------ Build started: Project: CabinetMaker.Web, Configuration: Debug Any CPU ------
+========== Build: 2 succeeded, 2 failed, 1 up-to-date, 0 skipped ==========
+========== Build completed at 5:46 AM and took 04.525 seconds ==========

@@ -1,0 +1,360 @@
+# CabinetMaker — Project Plan
+
+**Date:** 2026-10-07  
+**Stack:** C# · Blazor Server · .NET 10 · Entity Framework Core 10 · SQL Server · Bootstrap
+
+---
+
+## 1. Project Purpose
+
+CabinetMaker is a measurement-first design tool for cabinet makers and furniture builders. Its core job is to capture, organize, and calculate measurements for cabinet projects — from a single unit to a complete kitchen or custom furniture piece — and produce accurate cut lists, material estimates, and project summaries.
+
+A first-class, unit-agnostic measurement system is the foundational primitive the entire application is built on. Every dimension, mass, or volume value in the system flows through it.
+
+---
+
+## 2. Solution Structure
+
+```
+CabinetMaker.slnx
+└── src/
+    ├── CabinetMaker.Domain/      # Value objects, entities, enums, interfaces
+    ├── CabinetMaker.DAL/         # EF Core DbContext, migrations, repositories
+    ├── CabinetMaker.BRL/         # Business rules, services, validation
+    └── CabinetMaker.Web/         # Blazor Server UI, ViewModels, components
+```
+
+### Project dependency flow
+
+```
+Web → BRL → DAL → Domain
+         ↗
+       DAL
+```
+
+- **Domain** has zero dependencies on other projects (pure C#).
+- **DAL** references Domain for entity definitions.
+- **BRL** references DAL (via interfaces defined in Domain).
+- **Web** references BRL only; never touches DAL directly.
+
+---
+
+## 3. Measurement System
+
+This is the most critical design decision in the project. The system must be unit-agnostic at the value-object level and only apply units when displaying or converting.
+
+### 3.1 Core Types
+
+```
+MeasurementQuantity (enum)
+  Length | Area | Volume | Mass | Angle | Count
+
+MeasurementUnit (enum)
+  // Length
+  Millimeter | Centimeter | Meter | Inch | Foot | Yard
+  // Area
+  SquareMillimeter | SquareCentimeter | SquareMeter | SquareInch | SquareFoot
+  // Volume
+  CubicMillimeter | CubicCentimeter | CubicMeter | CubicInch | CubicFoot | Liter
+  // Mass
+  Gram | Kilogram | Ounce | Pound
+  // Angle
+  Degree | Radian
+
+Measurement (value object / record struct)
+  decimal Value
+  MeasurementUnit Unit
+  MeasurementQuantity Quantity  // derived from Unit
+
+  + To(MeasurementUnit targetUnit) → Measurement
+  + ToBaseUnit() → Measurement          // canonical storage unit
+  + ToString(format?) → string
+  + implicit operators, arithmetic operators
+```
+
+### 3.2 Storage Strategy
+
+All measurements are stored in the database as two columns:
+
+```sql
+MeasurementValue   DECIMAL(18,6)   -- value in the base unit
+MeasurementUnit    INT             -- enum ordinal (the unit the user chose)
+```
+
+The base unit per quantity is the canonical SI or industry-standard unit (Millimeter for Length, SquareMillimeter for Area, Gram for Mass, etc.). On read, the value is always converted back to the user's preferred unit before display.
+
+### 3.3 Conversion Engine
+
+A `UnitConverter` static service holds conversion factors relative to the base unit for each quantity. Adding a new unit is a one-line registration. No third-party unit library dependency is introduced at this stage — the domain is narrow enough to own this logic.
+
+### 3.4 User Preference
+
+A per-user (or per-project) `MeasurementPreference` record stores the default unit for each quantity. The UI renders all measurements in the user's preferred unit; the BRL layer converts to base before persisting.
+
+---
+
+## 4. Domain Model
+
+### 4.1 Core Entities
+
+```
+Project
+  Id, Name, Description
+  OwnerId (→ ApplicationUser)
+  CreatedAt, UpdatedAt
+  MeasurementPreferenceId (→ MeasurementPreference)
+  ICollection<Cabinet> Cabinets
+
+MeasurementPreference
+  Id
+  DefaultLengthUnit        (MeasurementUnit)
+  DefaultMassUnit          (MeasurementUnit)
+  DefaultVolumeUnit        (MeasurementUnit)
+
+Cabinet
+  Id, Name, Description
+  ProjectId (→ Project)
+  CabinetType              (Base | Wall | Tall | Island | Custom)
+  ExteriorWidth            (Measurement — stored as value+unit pair)
+  ExteriorHeight           (Measurement)
+  ExteriorDepth            (Measurement)
+  ICollection<CabinetComponent> Components
+  ICollection<CabinetMaterial> Materials
+
+CabinetComponent
+  Id, Name
+  CabinetId (→ Cabinet)
+  ComponentType            (Box | Door | Drawer | Shelf | FaceFrame | Custom)
+  Width, Height, Depth     (Measurement each)
+  Quantity                 (int)
+  MaterialId? (→ Material)
+
+Material
+  Id, Name, Description
+  Category                 (Sheet | Solid | Hardware | Finish | Other)
+  Thickness                (Measurement — nullable, relevant for sheet goods)
+  UnitCost                 (decimal)
+  CostUnit                 (MeasurementUnit — e.g., SquareFoot, LinearFoot, Each)
+
+CabinetMaterial
+  CabinetId, MaterialId    (join entity)
+  EstimatedQuantity        (Measurement)
+  Notes
+```
+
+### 4.2 Value Object Conventions
+
+`Measurement` is always a struct/record struct. EF Core maps it via owned entity (two columns per measurement). A custom `MeasurementValueConverter` handles serialization. All entity measurement properties use the `[Owned]` attribute or Fluent API `OwnsOne` configuration.
+
+---
+
+## 5. Data Access Layer (DAL)
+
+### 5.1 DbContext
+
+`CabinetMakerDbContext` inherits `IdentityDbContext<ApplicationUser>`. Owned entity mappings for `Measurement` are registered in `OnModelCreating` via a shared extension method `ConfigureMeasurement(builder, prefix)` so column naming is consistent:
+
+```
+cabinet.ExteriorWidth → ExteriorWidth_Value, ExteriorWidth_Unit
+```
+
+### 5.2 Repository Pattern
+
+Each aggregate root gets a typed repository interface in Domain and an EF implementation in DAL:
+
+```
+IProjectRepository  →  ProjectRepository
+ICabinetRepository  →  CabinetRepository
+IMaterialRepository →  MaterialRepository
+```
+
+A `IUnitOfWork` wraps the DbContext and exposes `SaveChangesAsync`. BRL calls repositories through interfaces; DAL wires them up via DI.
+
+### 5.3 Migrations
+
+EF Core migrations live under `DAL/Migrations/`. A `DbInitializer` seeds reference data (default materials, unit conversion factors if persisted) on first run in Development.
+
+---
+
+## 6. Business Rules Layer (BRL)
+
+### 6.1 Services
+
+```
+ProjectService        — CRUD for projects, cloning, archiving
+CabinetService        — cabinet CRUD, component management
+MeasurementService    — conversion, formatting, validation
+MaterialService       — material library CRUD, cost calculations
+CutListService        — generates an ordered cut list from a cabinet/project
+EstimateService       — rolls up material quantities and costs
+```
+
+### 6.2 Validation
+
+FluentValidation validators live in BRL and are registered as scoped services. Validators run at the service boundary before any persistence call.
+
+### 6.3 Result Pattern
+
+Services return `Result<T>` (a lightweight discriminated union — success or error list) rather than throwing on business-rule failures. Web layer maps `Result<T>` to UI feedback without try/catch clutter.
+
+---
+
+## 7. Web / UI Layer
+
+### 7.1 Blazor Render Mode
+
+**Interactive Server** render mode (already configured in `Program.cs`). All interactive components use `@rendermode InteractiveServer`. Static SSR is used for read-only pages (project list landing, print views).
+
+### 7.2 MVVM Approach — CommunityToolkit.Mvvm
+
+**Recommendation: use `CommunityToolkit.Mvvm`** (Microsoft-maintained, source-generator based, zero runtime overhead, works perfectly in Blazor).
+
+Key features used:
+- `ObservableObject` base class (or `[ObservableProperty]` source gen attribute)
+- `[RelayCommand]` for async commands
+- `IMessenger` / `WeakReferenceMessenger` for cross-component communication
+
+ViewModel pattern in Blazor:
+
+```
+ProjectListViewModel    ↔  ProjectListPage.razor
+ProjectDetailViewModel  ↔  ProjectDetailPage.razor
+CabinetEditorViewModel  ↔  CabinetEditorPage.razor
+MeasurementInputViewModel ↔ MeasurementInput.razor (shared component)
+```
+
+Each `.razor` page injects its ViewModel as a scoped service. The ViewModel exposes properties and commands; the Razor template binds to them. `StateHasChanged()` is triggered via a thin `ComponentBase` base class (`ViewModelComponentBase<TViewModel>`) that subscribes to `PropertyChanged`.
+
+```csharp
+// ViewModelComponentBase<T> pattern
+protected override void OnInitialized()
+    => ViewModel.PropertyChanged += (_, _) => InvokeAsync(StateHasChanged);
+```
+
+### 7.3 Component Hierarchy
+
+```
+Pages/
+  Projects/
+    ProjectList.razor         (lists all projects)
+    ProjectDetail.razor       (project overview, cabinet list)
+  Cabinets/
+    CabinetEditor.razor       (create/edit cabinet + components)
+    CabinetSummary.razor      (read-only card view)
+  Reports/
+    CutList.razor             (printable cut list)
+    MaterialEstimate.razor    (cost summary)
+Shared/
+  MeasurementInput.razor      (unit-aware numeric input field)
+  MeasurementDisplay.razor    (formatted read-only display)
+  UnitSelector.razor          (dropdown for unit selection)
+  ResultAlert.razor           (maps Result<T> errors to Bootstrap alerts)
+Layout/
+  MainLayout.razor
+  NavMenu.razor
+```
+
+### 7.4 Bootstrap Theme
+
+Bootstrap 5.x via CDN or npm (LibMan). Custom CSS variables override the Bootstrap palette to give the app a woodwork/craft aesthetic (warm neutrals, no neon accents). No custom component library — Bootstrap utility classes + minimal component-level `<style>` blocks only.
+
+---
+
+## 8. Implementation Phases
+
+### Phase 1 — Foundation (Measurement System + Domain)
+- [ ] `Measurement` value object with operators
+- [ ] `MeasurementUnit` / `MeasurementQuantity` enums
+- [ ] `UnitConverter` with full Imperial + Metric length support
+- [ ] EF owned-entity configuration + migrations (Projects, Cabinets, Components, Materials)
+- [ ] `IUnitOfWork` + repository interfaces and EF implementations
+- [ ] `DbInitializer` seed data
+
+### Phase 2 — Business Rules
+- [ ] `ProjectService`, `CabinetService`, `MaterialService`
+- [ ] `MeasurementService` (convert, format, validate)
+- [ ] `Result<T>` type
+- [ ] FluentValidation validators for all entities
+- [ ] `CutListService` — first pass (flat list, no nesting optimization)
+
+### Phase 3 — UI Shell + MVVM Wiring
+- [ ] Add `CommunityToolkit.Mvvm` NuGet to Web project
+- [ ] `ViewModelComponentBase<T>` base component
+- [ ] Bootstrap layout, NavMenu, MainLayout
+- [ ] `MeasurementInput` + `MeasurementDisplay` components
+- [ ] `UnitSelector` component respecting `MeasurementPreference`
+
+### Phase 4 — Feature Pages
+- [ ] Project list + create/edit
+- [ ] Cabinet editor (dimensions + components)
+- [ ] Material library
+- [ ] Cut list report (screen + print CSS)
+- [ ] Material estimate report
+
+### Phase 5 — Auth + Multi-User
+- [ ] ASP.NET Core Identity (already referenced in DAL)
+- [ ] Login / Register pages
+- [ ] `MeasurementPreference` per user, persisted
+- [ ] Project ownership and access control
+
+### Phase 6 — Quality + Polish
+- [ ] xUnit + bUnit test projects
+- [ ] Measurement conversion unit tests
+- [ ] Cut list accuracy tests
+- [ ] Export to CSV / PDF (cut list + estimate)
+- [ ] Keyboard navigation, ARIA labels
+- [ ] Performance: paging on large project/cabinet lists
+
+---
+
+## 9. NuGet Package Plan
+
+| Project | Package | Purpose |
+|---|---|---|
+| Domain | *(none)* | Pure C# value objects |
+| DAL | `Microsoft.EntityFrameworkCore` 10.x | ORM |
+| DAL | `Microsoft.EntityFrameworkCore.SqlServer` 10.x | SQL Server provider |
+| DAL | `Microsoft.AspNetCore.Identity.EntityFrameworkCore` 10.x | Identity tables |
+| BRL | `FluentValidation` | Entity validation |
+| Web | `CommunityToolkit.Mvvm` | MVVM source generators |
+| Web | `Microsoft.AspNetCore.Components.WebAssembly` | (optional, Phase 6+) |
+
+---
+
+## 10. Open Questions — Answers Needed
+
+The following decisions will shape implementation choices. Please review and answer:
+
+**Q1 — Cabinet Domain Vocabulary**  
+What are the named cabinet types and sub-components you work with? (e.g., face-frame vs. frameless construction, overlay vs. inset doors?) Knowing the shop's vocabulary ensures the domain model uses the right terms from day one.
+
+**Q2 — Target Units**  
+Which unit systems must the app support at launch? Imperial only (inches/feet), Metric only (mm/cm/m), or both simultaneously (user picks per project)? Are fractional inches (1/8", 1/16") a display requirement or is decimal inches acceptable?
+
+**Q3 — Deployment Target**  
+Where will this app run — local machine only (localhost), internal network, or publicly hosted (Azure/IIS)? This affects how the DB connection string, Identity, and HTTPS are configured.
+
+**Q4 — Database**  
+The DAL already references SQL Server. For local development, should we use a LocalDB instance, a full SQL Server, or SQLite (zero-install, simpler for solo use)? Is there a named SQL Server instance you're targeting?
+
+**Q5 — Single User vs. Multi-User**  
+Identity is already referenced in the DAL. Is this a single-user tool (one login, no sharing) or multi-user (multiple accounts, each with their own projects)? If multi-user, do users share a material library or keep separate ones?
+
+**Q6 — Cut List Output**  
+What does a useful cut list look like for your workflow? Flat list (part name, W×H×D, material, qty), grouped by material, or optimized for sheet layout? Do you need a sheet yield optimizer (nesting algorithm) now or is a flat list enough to start?
+
+**Q7 — MVVM Library Confirmation**  
+The plan recommends `CommunityToolkit.Mvvm`. Are you comfortable with that choice, or do you have a preferred MVVM library / want to roll a minimal custom implementation?
+
+**Q8 — Existing Domain Knowledge to Carry Over**  
+From the prior project that was abandoned — are there specific domain objects, terminology, or business rules we should preserve? Any data to migrate?
+
+**Q9 — Testing Appetite**  
+What level of automated testing matters to you? Unit tests for the measurement/conversion engine (essential), integration tests against a real DB, or UI tests with bUnit?
+
+**Q10 — Timeline / Priority**  
+Which Phase is the most valuable to have working first? If you need the cut list quickly, Phase 1→2→4 (reports) can be prioritized over Identity (Phase 5).
+
+---
+
+*Last updated: 2026-10-07*

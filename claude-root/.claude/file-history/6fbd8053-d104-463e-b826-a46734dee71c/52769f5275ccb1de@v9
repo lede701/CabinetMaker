@@ -1,0 +1,68 @@
+using CabinetMaker.BRL.Extensions;
+using CabinetMaker.BRL.Services;
+using CabinetMaker.DAL.Context;
+using CabinetMaker.DAL.Extensions;
+using CabinetMaker.Domain.Shared.Settings;
+using Microsoft.EntityFrameworkCore;
+using CabinetMaker.Web.Components;
+using CabinetMaker.Web.Components.Account;
+using CabinetMaker.Web.Infrastructure;
+using CabinetMaker.Web.Middleware;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Components.Server.Circuits;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+
+builder.Services.AddCascadingAuthenticationState();
+builder.Services.AddScoped<CmIdentityRedirectManager>();
+builder.Services.AddScoped<AuthenticationStateProvider, CmIdentityRevalidatingAuthenticationStateProvider>();
+builder.Services.AddScoped<CircuitHandler, CircuitTenantContextHandler>();
+
+builder.Services.Configure<CmSettings>(builder.Configuration.GetSection(CmSettings.Key));
+CmSettings settings = new CmSettings();
+builder.Configuration.GetSection(CmSettings.Key).Bind(settings);
+
+builder.Services.AddDataLayer(config =>
+{
+    config.DatabaseProvider = settings.DatabaseProvider;
+    config.DatabaseConnectionString = settings.ConnectionStrings.DefaultConnection;
+}).AddBusinessLayer(config =>
+{
+    config.AdminEmail = settings.Seed.AdminEmail;
+    config.AdminPassword = settings.Seed.AdminPassword;
+    config.AdminDisplayName = settings.Seed.AdminDisplayName;
+});
+
+var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<CmContext>();
+    await context.Database.MigrateAsync();
+
+    var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
+    await seeder.SeedAsync();
+}
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error", createScopeForErrors: true);
+    app.UseHsts();
+}
+
+app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseMiddleware<TenantContextMiddleware>();
+app.UseAntiforgery();
+app.MapStaticAssets();
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
+
+app.MapAdditionalIdentityEndpoints();
+
+app.Run();

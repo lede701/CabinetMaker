@@ -1,0 +1,22 @@
+@page "/account/manage/2fa"
+
+<PageTitle>Two-Factor Authentication</PageTitle>
+
+<h3 class="mb-4">Two-Factor Authentication</h3>
+<StatusMessage Message="@message" />
+
+@if (is2faEnabled)
+{
+    <div class="alert alert-success">
+        Two-factor authentication is <strong>enabled</strong> for your account.
+    </div>
+    <a href="/account/manage/disable-2fa" class="btn btn-outline-danger me-2">Disable 2FA</a>
+    <a href="/account/manage/enable-authenticator" class="btn btn-outline-secondary">Reset Authenticator App</a>
+}
+else
+{
+    <div class="alert alert-warning">
+        Two-factor authentication is <strong>not enabled</strong> for your account.
+    </div>
+    <a href="/account/manage/enable-authenticator" class="btn btn-primary">Enable Authenticator App</a>
+}

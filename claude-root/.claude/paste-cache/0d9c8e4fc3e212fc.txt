@@ -1,0 +1,19 @@
+Rebuild started at 9:43 AM...
+Restored C:\Data\Apps\CabinetMaker\src\CabinetMaker.Domain.Shared\CabinetMaker.Domain.Shared.csproj (in 4 ms).
+Restored C:\Data\Apps\CabinetMaker\src\CabinetMaker.Domain\CabinetMaker.Domain.csproj (in 345 ms).
+Waiting for background operations to complete...
+1>------ Rebuild All started: Project: CabinetMaker.Domain, Configuration: Debug Any CPU ------
+2>------ Rebuild All started: Project: CabinetMaker.Domain.Shared, Configuration: Debug Any CPU ------
+Restored C:\Data\Apps\CabinetMaker\src\CabinetMaker.DAL\CabinetMaker.DAL.csproj (in 351 ms).
+Restored C:\Data\Apps\CabinetMaker\src\CabinetMaker.Web\CabinetMaker.Web.csproj (in 353 ms).
+Restored C:\Data\Apps\CabinetMaker\src\CabinetMaker.BRL\CabinetMaker.BRL.csproj (in 351 ms).
+2>  CabinetMaker.Domain.Shared -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.Domain.Shared\bin\Debug\net10.0\CabinetMaker.Domain.Shared.dll
+1>  CabinetMaker.Domain -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.Domain\bin\Debug\net10.0\CabinetMaker.Domain.dll
+3>------ Rebuild All started: Project: CabinetMaker.DAL, Configuration: Debug Any CPU ------
+3>  CabinetMaker.DAL -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.DAL\bin\Debug\net10.0\CabinetMaker.DAL.dll
+4>------ Rebuild All started: Project: CabinetMaker.BRL, Configuration: Debug Any CPU ------
+4>  CabinetMaker.BRL -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.BRL\bin\Debug\net10.0\CabinetMaker.BRL.dll
+5>------ Rebuild All started: Project: CabinetMaker.Web, Configuration: Debug Any CPU ------
+5>  CabinetMaker.Web -> C:\Data\Apps\CabinetMaker\src\CabinetMaker.Web\bin\Debug\net10.0\CabinetMaker.Web.dll
+========== Rebuild All: 5 succeeded, 0 failed, 0 skipped ==========
+========== Rebuild completed at 9:43 AM and took 07.669 seconds ==========

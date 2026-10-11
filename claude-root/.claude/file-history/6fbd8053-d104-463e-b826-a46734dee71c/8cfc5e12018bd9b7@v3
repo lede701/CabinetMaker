@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/10-Servers/">
+    <Project Path="src/CabinetMaker.Web/CabinetMaker.Web.csproj" Id="dad112f4-a2a9-4357-ba3f-1f95bfeb0a2f" />
+  </Folder>
+  <Folder Name="/20-BusinessRules/">
+    <Project Path="src/CabinetMaker.BRL/CabinetMaker.BRL.csproj" Id="d6d2f275-3049-4cc4-ade1-cded5d9c6092" />
+  </Folder>
+  <Folder Name="/30-Data Layer/">
+    <Project Path="src/CabinetMaker.DAL/CabinetMaker.DAL.csproj" Id="cf461f14-2e1b-4cd4-869a-fe78cd1c532f" />
+    <Project Path="src/CabinetMaker.Domain.Shared/CabinetMaker.Domain.Shared.csproj" Id="e2f70077-8813-43be-86d2-1809708fbb8e" />
+    <Project Path="src/CabinetMaker.Domain/CabinetMaker.Domain.csproj" Id="1ea11ce3-fa3e-4446-8978-d833b044fb0b" />
+  </Folder>
+</Solution>

@@ -1,0 +1,30 @@
+@page "/login"
+@layout AuthLayout
+
+<PageTitle>Sign In</PageTitle>
+
+<div class="card shadow-sm" style="width: 420px; max-width: 95vw;">
+    <div class="card-body p-4">
+        <h2 class="mb-4">Sign In</h2>
+        <StatusMessage Message="@errorMessage" />
+        <EditForm EditContext="editContext" method="post" OnSubmit="LoginUser" FormName="login">
+            <DataAnnotationsValidator />
+            <ValidationSummary class="text-danger" role="alert" />
+            <div class="form-floating mb-3">
+                <InputText @bind-Value="Input.Email" id="email" class="form-control" autocomplete="username" placeholder="name@example.com" />
+                <label for="email">Email</label>
+                <ValidationMessage For="() => Input.Email" class="text-danger" />
+            </div>
+            <div class="form-floating mb-3">
+                <InputText type="password" @bind-Value="Input.Password" id="password" class="form-control" autocomplete="current-password" placeholder="password" />
+                <label for="password">Password</label>
+                <ValidationMessage For="() => Input.Password" class="text-danger" />
+            </div>
+            <div class="form-check mb-3">
+                <InputCheckbox @bind-Value="Input.RememberMe" id="rememberMe" class="form-check-input" />
+                <label class="form-check-label" for="rememberMe">Remember me</label>
+            </div>
+            <button type="submit" class="w-100 btn btn-lg btn-primary">Sign In</button>
+        </EditForm>
+    </div>
+</div>

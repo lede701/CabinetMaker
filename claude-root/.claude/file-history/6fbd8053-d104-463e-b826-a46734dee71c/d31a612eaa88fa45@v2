@@ -1,0 +1,59 @@
+using CabinetMaker.DAL.Context;
+using CabinetMaker.Domain.Entities;
+using CabinetMaker.Domain.Enums;
+using CabinetMaker.Domain.Interfaces.Repositories;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using System.Linq.Expressions;
+
+namespace CabinetMaker.DAL.Repositories;
+
+public class BaseRepository<TEntity> : IRepository<TEntity> where TEntity : CmEntity
+{
+    private readonly ILogger<BaseRepository<TEntity>> _logger;
+    protected CmContext Context { get; }
+    protected DbSet<TEntity> Set => Context.Set<TEntity>();
+
+    public BaseRepository(ILogger<BaseRepository<TEntity>> logger, CmContext context)
+    {
+        _logger = logger;
+        Context = context;
+    }
+
+    public async Task<IEnumerable<TEntity>> GetAllAsync()
+        => await Set.Where(e => e.RecordStateId == (int)RecordStateTypeId.Active).ToListAsync();
+
+    public async Task<IEnumerable<TEntity>> GetAsync(Expression<Func<TEntity, bool>> predicate)
+        => await Set.Where(e => e.RecordStateId == (int)RecordStateTypeId.Active).Where(predicate).ToListAsync();
+
+    public async Task<TEntity?> GetAsync(int id)
+    {
+        var entity = await Set.FindAsync(id);
+        return entity?.RecordStateId == (int)RecordStateTypeId.Active ? entity : null;
+    }
+
+    public async Task<bool> UpdateAsync(TEntity entity)
+    {
+        Context.Entry(entity).State = EntityState.Modified;
+        return await Context.SaveChangesAsync() > 0;
+    }
+
+    public async Task<bool> AddAsync(TEntity entity)
+    {
+        await Set.AddAsync(entity);
+        return await Context.SaveChangesAsync() > 0;
+    }
+
+    public async Task<bool?> DeleteAsync(int id)
+    {
+        var entity = await Set.FindAsync(id);
+        if (entity is null) return null;
+        return await DeleteAsync(entity);
+    }
+
+    public async Task<bool?> DeleteAsync(TEntity entity)
+    {
+        entity.RecordStateId = (int)RecordStateTypeId.Deleted;
+        return await UpdateAsync(entity);
+    }
+}

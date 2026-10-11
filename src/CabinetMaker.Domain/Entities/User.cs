@@ -1,0 +1,11 @@
+﻿using Microsoft.AspNetCore.Identity;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class User : IdentityUser<int>
+{
+    public Guid UserGuid { get; set; }
+    public int? TenantId { get; set; }
+    public string DisplayName { get; set; } = string.Empty;
+    public string TimeZoneId { get; set; } = "UTC";
+}

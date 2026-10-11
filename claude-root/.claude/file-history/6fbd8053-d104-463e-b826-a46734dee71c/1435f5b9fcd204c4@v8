@@ -1,0 +1,63 @@
+using CabinetMaker.DAL.Context;
+using CabinetMaker.DAL.Repositories;
+using CabinetMaker.Domain.Entities;
+using CabinetMaker.Domain.Interfaces;
+using CabinetMaker.Domain.Interfaces.Repositories;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace CabinetMaker.DAL.Extensions;
+
+public static class DalServiceExtensions
+{
+    public static IServiceCollection AddDataLayer(this IServiceCollection services)
+        => AddDataLayer(services, new DalServiceConfiguration());
+
+    public static IServiceCollection AddDataLayer(this IServiceCollection services, Action<DalServiceConfiguration> configure)
+    {
+        var config = new DalServiceConfiguration();
+        configure(config);
+        return AddDataLayer(services, config);
+    }
+
+    public static IServiceCollection AddDataLayer(this IServiceCollection services, DalServiceConfiguration config)
+    {
+        services.AddSingleton(TimeProvider.System);
+        services.AddCabinetMakerDatabase(config);
+        services.AddScoped<TenantContext>();
+        services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<TenantContext>());
+        services.AddScoped<IRepository<CmUnit>, UnitRepository>();
+        services.AddAuthentication(options =>
+        {
+            options.DefaultScheme = IdentityConstants.ApplicationScheme;
+            options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
+        })
+        .AddIdentityCookies();
+
+        services.AddIdentityCore<User>(options =>
+        {
+            options.Password.RequireDigit = true;
+            options.Password.RequiredLength = 8;
+            options.Password.RequireNonAlphanumeric = true;
+            options.Password.RequireUppercase = true;
+            options.Lockout.MaxFailedAccessAttempts = 5;
+            options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+            options.User.RequireUniqueEmail = true;
+        })
+        .AddRoles<IdentityRole<int>>()
+        .AddEntityFrameworkStores<CmContext>()
+        .AddSignInManager()
+        .AddDefaultTokenProviders();
+
+        services.ConfigureApplicationCookie(options =>
+        {
+            options.LoginPath = "/login";
+            options.LogoutPath = "/account/logout";
+            options.AccessDeniedPath = "/access-denied";
+            options.SlidingExpiration = true;
+            options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        });
+
+        return services;
+    }
+}

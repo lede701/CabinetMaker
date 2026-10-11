@@ -1,0 +1,50 @@
+﻿using CabinetMaker.Domain.Interfaces.Repositories;
+using Microsoft.Extensions.Logging;
+using System.Linq.Expressions;
+
+namespace CabinetMaker.DAL.Repositories;
+
+public class BaseRepository<TEntity> : IRepository<TEntity>
+{
+    private readonly ILogger<BaseRepository<TEntity>> _logger;
+    private readonly TimeProvider _time;
+
+    public DateTime NowUtc => this._time.GetUtcNow().DateTime;
+
+    public BaseRepository(ILogger<BaseRepository<TEntity>> logger, TimeProvider time)
+    {
+        this._logger = logger;
+        this._time = time;
+    }
+
+    public async Task<IEnumerable<TEntity>> GetAsync(Expression<Func<TEntity, bool>> predicate)
+    {
+        return new List<TEntity>();
+    }
+
+    public async Task<TEntity?> GetAsync(int id)
+    {
+        return default;
+    }
+
+    public async Task<bool> UpdateAsync(TEntity entity)
+    {
+        return false;
+    }
+
+    public async Task<bool> AddAsync(TEntity entity)
+    {
+        return false;
+    }
+
+    public async Task<bool?> DeleteAsync(int id)
+    {
+        return false;
+    }
+
+    public async Task<bool?> DeleteAsync(TEntity entity)
+    {
+        return false;
+    }
+
+}

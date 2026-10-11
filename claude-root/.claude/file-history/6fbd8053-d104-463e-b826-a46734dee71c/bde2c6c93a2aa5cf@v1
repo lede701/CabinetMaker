@@ -1,0 +1,11 @@
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class CmMaterialDetail : CmEntityHistory
+{
+    [Key]
+    public int CmMaterialDetailId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string? Description { get; set; } = default;
+}

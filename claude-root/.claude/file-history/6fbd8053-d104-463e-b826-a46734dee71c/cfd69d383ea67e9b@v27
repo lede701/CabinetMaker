@@ -1,0 +1,1239 @@
+# CabinetMaker — Project Plan
+
+**Date:** 2026-10-11
+
+**Stack:** C# · Blazor Server · .NET 10 · Entity Framework Core 10 · MySQL (primary) / SQL Server (supported) · Bootstrap · Docker (Linux)
+
+## 1. Project Purpose
+
+CabinetMaker is a professional-grade, multi-tenant design tool for cabinet makers and furniture builders. Its core job is to capture, organize, and calculate measurements for cabinet projects — from a single unit to a complete kitchen or custom furniture piece — and produce accurate cut lists, material estimates, and project summaries.
+
+Two foundational primitives underpin everything else:
+
+1. A **database-driven, unit-agnostic measurement system** — every dimension, mass, or volume flows through a unified conversion engine, preventing metric/imperial collisions and supporting tape-measure-accurate fractional snapping.
+
+2. A **tenant isolation model** — every piece of data is scoped to the tenant it belongs to, enforced at the database layer, invisible to application code.
+
+## 2. Infrastructure & Deployment
+
+### 2.1 Docker / Linux Hosting
+
+The application is packaged as a Docker container and can run on any Linux Docker host (self-hosted, VPS, cloud VM). No Azure-specific or Windows-specific dependencies are permitted.
+
+```
+docker-compose.yml (development)
+  web       — CabinetMaker.Web container (port 8080)
+  db        — MySQL 8.x container (port 3306)
+
+Dockerfile  (multi-stage)
+  Stage 1 (build): mcr.microsoft.com/dotnet/sdk:10.0
+  Stage 2 (runtime): mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim
+```
+
+All configuration (connection strings, admin seed credentials) is supplied via environment variables. No secrets are baked into the image.
+
+Two compose files are maintained:
+
+| File | Purpose |
+|---|---|
+| `docker-compose.yml` | Local development — builds from source, exposes all ports, ships with safe dev defaults, includes dbgate DB admin UI on port 8081 |
+| `docker-compose.prod.yml` | Production — pulls a pre-built registry image, binds web to `127.0.0.1:8080` only, no default passwords, `restart: always`, no DB admin UI |
+
+### 2.1.1 Production Reverse Proxy
+
+In production the app sits behind an existing nginx reverse proxy (Nginx Proxy Manager or equivalent). The app container binds only to `127.0.0.1:8080` — it is never directly internet-facing. The proxy handles SSL termination, domain assignment, and certificate management. Deploying a new version is: push image to registry → pull on server → `docker compose -f docker-compose.prod.yml up -d` → register the `127.0.0.1:8080` upstream in the proxy console. No nginx container is included in the production compose file.
+
+### 2.2 Database Provider Abstraction
+
+**Primary: MySQL 8.x** (Oracle official `MySql.EntityFrameworkCore` provider). **Also supported: SQL Server** (Microsoft EF Core provider). The active provider is selected at startup from a single config value:
+
+```
+# appsettings.json / environment variable
+"DatabaseProvider": "MySql"   // or "SqlServer"
+```
+
+A `DatabaseProviderFactory` extension method in DAL registers the correct `DbContextOptions` based on this value:
+
+```csharp
+// DAL/Extensions/DatabaseProviderExtensions.cs
+services.AddDbContext<CabinetMakerDbContext>(options =>
+{
+    if (provider == "MySql")
+        options.UseMySQL(connectionString);
+    else
+        options.UseSqlServer(connectionString);
+});
+```
+
+**Provider differences to account for:**
+
+| Feature | MySQL (Pomelo) | SQL Server |
+|---|---|---|
+| JSON columns | `JSON` type, `.HasColumnType("json")` | `nvarchar(max)` or `json` (SQL Server 2022+) |
+| GUIDs | `char(36)` or `binary(16)` | `uniqueidentifier` |
+| Auto-increment | `AUTO_INCREMENT` | `IDENTITY` |
+| Migrations | Separate migration sets per provider, or provider-aware migrations |
+
+Migrations are kept in separate folders: `DAL/Migrations/MySql/` and `DAL/Migrations/SqlServer/`. A CLI helper script selects the correct migration context at design time.
+
+### 2.3 Timezone Architecture
+
+All temporal data in the system must be unambiguous about which instant in time it refers to. This matters especially for future-dated succession records (§5.1) where a user schedules a material change to take effect "at midnight on Nov 1" — midnight in *whose* timezone needs a definitive answer.
+
+#### Rule: UTC everywhere in the database and server
+
+- **Database:** All `DATETIME` columns store UTC values. The DB server timezone is irrelevant and must never influence stored values. MySQL `TIMESTAMP` type is specifically avoided because it auto-converts using the server timezone — `DATETIME` is used instead.
+- **C# domain model:** All temporal properties use `DateTime`, always in UTC. The convention is enforced at the service boundary — every value written to a `DateTime` field must be UTC. Reading from DB always returns UTC. `DateTime.Now` is never used anywhere in the codebase.
+- **EF Core convention:** A global value converter enforces `DateTimeKind.Utc` on all `DateTime` properties at the DbContext boundary, converting any non-UTC value on read and throwing on write if `Kind != Utc`.
+- **Server-side "now":** All services obtain the current instant through an injected `TimeProvider`. Never call `DateTime.UtcNow` or `DateTime.Now` directly.
+
+```csharp
+// Production — registered once in Program.cs
+services.AddSingleton(TimeProvider.System);
+
+// In any service that needs the current time
+public class RecordSuccessionService(TimeProvider timeProvider)
+{
+    private DateTime Now => _timeProvider.GetUtcNow().DateTime;
+}
+```
+
+Using `TimeProvider` makes every service that touches time fully testable — `FakeTimeProvider` (from `Microsoft.Extensions.TimeProvider.Testing`) lets tests set and advance the clock without any static manipulation.
+
+#### Rule: User timezone stays in the UI layer
+
+The server and BRL services are timezone-unaware. They only speak UTC. Conversion happens at the edges:
+
+```
+User types "Nov 1 midnight"
+  → UI reads user's IANA timezone from preference (e.g., "America/New_York")
+  → UI converts: Nov 1 00:00 America/New_York → 2026-11-01 05:00:00 UTC
+  → Command sent to BRL carries the UTC DateTime
+  → Stored in DB as UTC DATETIME
+
+DB returns 2026-11-01 05:00:00 (UTC)
+  → UI converts back to America/New_York → displays "Nov 1 12:00 AM"
+```
+
+#### User Timezone Preference
+
+Each `ApplicationUser` stores an IANA timezone identifier (e.g., `America/New_York`, `Europe/London`, `America/Los_Angeles`). Windows timezone names are explicitly not used — IANA identifiers are portable across Linux containers.
+
+If a user has not set a timezone preference, the Blazor app captures the browser's IANA timezone via a one-time JS interop call on session start and uses it as the session default (without persisting it):
+
+```javascript
+// Called once on circuit connect
+Intl.DateTimeFormat().resolvedOptions().timeZone  // → "America/Chicago"
+```
+
+#### Timezone Conversion Service
+
+`ITimezoneService` is defined in BRL. The Web project provides the implementation using `NodaTime` (which correctly handles DST transitions, historical offset changes, and all IANA timezone rules):
+
+```csharp
+public interface ITimezoneService
+{
+    DateTime ToUtc(DateTime localDateTime, string ianaTimezoneId);
+    DateTime ToLocal(DateTime utcValue, string ianaTimezoneId);
+    string GetUserTimezone(); // reads from current user claim or session default
+}
+```
+
+`NodaTime` is added only to the **Web** project (display concerns). Domain and BRL remain free of any NodaTime dependency — they only ever hold `DateTime` values in UTC.
+
+#### DST Transition Edge Cases
+
+DST transitions produce two distinct failure modes that require explicit handling. Both are **UI input problems only** — once a value is stored as UTC the succession logic is completely DST-immune.
+
+**Case 1 — Gap (spring forward):** Clocks jump forward (e.g., 2:00 AM → 3:00 AM on March 8 in US/Central). The hour 2:00–3:00 AM does not exist. Any local time in that window is invalid.
+
+**Case 2 — Overlap (fall back):** Clocks fall back (e.g., 2:00 AM → 1:00 AM on Nov 1 in US/Central). The hour 1:00–2:00 AM occurs twice. "1:30 AM Nov 1" is ambiguous — it could be 1:30 AM CDT (UTC−5) or 1:30 AM CST (UTC−6), two different UTC instants 60 minutes apart.
+
+NodaTime's `DateTimeZone.MapLocal(LocalDateTime)` returns a `ZoneLocalMapping` that explicitly identifies which case applies:
+
+```csharp
+var zone = DateTimeZoneProviders.Tzdb[ianaTimezoneId];
+var mapping = zone.MapLocal(localDateTime);
+
+switch (mapping.Count)
+{
+    case 1:
+        // Unambiguous — normal case
+        return mapping.Single().ToDateTimeUtc().ToDateTimeUnspecified(); // DateTime UTC
+
+    case 0:
+        // GAP: this local time does not exist (spring forward)
+        // Do not silently snap — surface to the user
+        throw new SkippedTimeException(localDateTime, zone);
+
+    case 2:
+        // OVERLAP: this local time exists twice (fall back)
+        // Do not silently pick one — surface to the user
+        throw new AmbiguousTimeException(localDateTime, zone,
+            mapping.First().ToDateTimeUtc(),   // earlier (daylight) as UTC DateTime
+            mapping.Last().ToDateTimeUtc());   // later (standard) as UTC DateTime
+}
+```
+
+**UI behavior for each case:**
+
+| Case | What the user sees | Suggested default |
+|---|---|---|
+| Normal | Nothing — input accepted, converted to UTC silently | — |
+| Gap (spring forward) | Inline warning: *"This time doesn't exist — clocks skip from [before] to [after] on this date. Use [time before gap] or [time after gap]?"* with two buttons | Snap forward (post-gap) |
+| Overlap (fall back) | Inline warning: *"This time occurs twice due to the clock change. Which did you mean — [offset 1] or [offset 2]?"* with two buttons showing explicit UTC offsets | Standard time (later occurrence) |
+
+Both warnings are handled in the `DateTimeInput` Blazor component. The component emits a resolved UTC `DateTime` only after the ambiguity is cleared.
+
+**Why succession records are DST-immune once stored:**
+
+The temporal query `EffectiveDate <= queryInstant && (ObsoleteDate == null || ObsoleteDate > queryInstant)` runs entirely in UTC. UTC has no clock changes — every instant is unique and unambiguous. No "blocking out" strategy is needed, unlike recurring scheduled tasks which must deal with DST on every firing.
+
+The recurring-scheduler problem arises because a rule like "run at 2:00 AM every day" has to be re-evaluated each day against a potentially shifting local clock. Succession records have no such rule — they are one-time point-in-time events fully resolved to UTC at the moment of creation.
+
+#### Why This Avoids the Common Pitfalls
+
+| Pitfall | How this design avoids it |
+|---|---|
+| Spring-forward gap: user enters a non-existent time | `ZoneLocalMapping.Count == 0` detected; UI shows disambiguation — never silently snapped |
+| Fall-back overlap: user enters an ambiguous time | `ZoneLocalMapping.Count == 2` detected; UI shows both UTC offsets for user to choose |
+| Recurring task fires twice on fall-back | Not applicable — successions are one-time events, not recurring rules |
+| MySQL server timezone contamination | `DATETIME` type (not `TIMESTAMP`) — MySQL never auto-converts |
+| `DateTime.Kind.Unspecified` written to DB | EF global value converter enforces `DateTimeKind.Utc` on all `DateTime` properties — throws on write if Kind is not Utc |
+| Future date stored in wrong timezone | User input always converted to UTC in UI before leaving the browser context |
+| Reporting across timezones | All report queries run in UTC; display layer converts per-user |
+
+## 3. Solution Structure
+
+```
+CabinetMaker.slnx
+└── src/
+    ├── CabinetMaker.Domain/         # EF entities + base classes — private to DAL
+    ├── CabinetMaker.Domain.Shared/  # POCOs, repository interfaces, Result<T>, Mapperly mappers
+    ├── CabinetMaker.DAL/            # EF DbContext, migrations, repository implementations
+    ├── CabinetMaker.BRL/            # Business rules, services, validation
+    └── CabinetMaker.Web/            # Blazor Server UI, ViewModels (MVVM)
+
+# Future phase — added only when MAUI client is built:
+#   CabinetMaker.API/               # GraphQL API (Hot Chocolate) — thin layer over BRL
+#   CabinetMaker.MAUI/              # .NET MAUI client — calls API via GraphQL
+```
+
+### Project Dependency Flow
+
+```
+Web  ──────────────────────────────────► Domain.Shared
+ │                                            ▲
+ ▼                                            │
+BRL  ──────────────────────────────────► Domain.Shared
+ │                                            ▲
+ ▼                                            │
+DAL  ──► Domain (EF entities)  ──────► Domain.Shared
+```
+
+| Project | References | Never references |
+|---|---|---|
+| `Domain` | *(none)* | Everything else |
+| `Domain.Shared` | *(none)* | Everything else |
+| `DAL` | `Domain` + `Domain.Shared` | `BRL`, `Web` |
+| `BRL` | `Domain.Shared` only | `Domain`, `DAL` directly |
+| `Web` | `BRL` + `Domain.Shared` | `Domain`, `DAL` directly |
+
+`Domain` is completely invisible above the DAL boundary. BRL and Web never import an EF entity type. DAL repositories accept and return only `Domain.Shared` POCOs — the EF entity is an internal implementation detail of the repository method.
+
+### What lives in each project
+
+**`Domain`** — EF entity classes, `CmEntity` / `CmEntityHistory` base classes. Nothing else.
+
+**`Domain.Shared`** — everything the upper layers need to work with:
+- **POCOs** — plain classes mirroring entity data shapes, no base class, no EF attributes. **POCOs expose `{TableName}Guid` only — the `int {TableName}Id` is stripped at the DAL boundary and never reaches BRL or Web.** All POCO-to-POCO references use `Guid` properties.
+- **Repository interfaces** — `IProjectRepository`, `IMaterialRepository`, etc.; all signatures use POCO types
+- **Service interfaces** — `ITimezoneService`, `IPlanGateService`, etc.
+- **`Result<T>`** — the success/failure discriminated union used throughout BRL
+- **Shared enums** — `PlanFeature`, `RecordState`, `PlanType`
+- **Mapperly POCO→POCO mappers** — for any cross-POCO transformations needed in BRL or Web
+
+**`DAL`** — EF `DbContext`, repository implementations, migrations, and **Mapperly Entity→POCO mappers**. This is the only project that ever sees both an EF entity and its POCO counterpart. The mapper runs just before a repository method returns.
+
+### Mapperly — Entity → POCO mapping
+
+[Mapperly](https://mapperly.riok.app/) (`Riok.Mapperly`) is a source generator: you declare a partial mapper class and it emits the full mapping method body at compile time. Zero reflection, no runtime overhead, and mapping errors surface at build time.
+
+```csharp
+// DAL/Mappers/MaterialMapper.cs
+[Mapper]
+public partial class MaterialMapper
+{
+    public partial MaterialPoco ToMaterial(Material entity);
+    public partial Material ToEntity(MaterialPoco poco);
+
+    // Collections handled automatically
+    public partial List<MaterialPoco> ToMaterialList(IEnumerable<Material> entities);
+}
+```
+
+The mapper in DAL is also responsible for the int→Guid promotion: the entity carries both `{TableName}Id` and `{TableName}Guid`, but the generated POCO only receives the `Guid`. The `int` key never leaves the DAL.
+
+- Entity→POCO mappers live in **DAL** (only project with access to both types)
+- POCO→POCO mappers (e.g., flattening for a report view) live in **Domain.Shared**
+- Mapperly is added to **both** `Domain.Shared` and `DAL` as a source-generator-only reference:
+
+```xml
+<PackageReference Include="Riok.Mapperly" Version="x.x.x"
+                  PrivateAssets="all" IncludeAssets="analyzers;build" />
+```
+
+`PrivateAssets="all"` means the generator runs at build time but adds no runtime DLL dependency — the output is just the generated C# code.
+
+## 4. Multi-Tenancy & Identity Architecture
+
+### 3.1 Isolation Model — Row-Level with Global Query Filters
+
+**Choice: single database, shared schema, `TenantId` discriminator column on every tenant-scoped table.**
+EF Core Global Query Filters enforce isolation at the ORM layer. No query in the application ever accidentally crosses tenant boundaries.
+
+### 3.2 Base Classes & Key Naming Convention
+
+All entities inherit from one of two base classes defined in `CabinetMaker.Domain`:
+
+**`CmEntity`** — standard base for all non-temporal entities:
+
+```csharp
+// CabinetMaker.Domain/Entities/CmEntity.cs
+public class CmEntity
+{
+    public DateTime CreatedDate { get; set; }       // UTC — set on insert
+    public int CreatedUserId { get; set; }          // FK → ApplicationUser.Id
+    public DateTime? LastUpdatedDate { get; set; }  // UTC — set on every update
+    public int? LastUpdatedUserId { get; set; }     // FK → ApplicationUser.Id
+    public int RecordStateId { get; set; }          // FK → CmType (Active/Inactive/Deleted)
+}
+```
+
+**`CmEntityHistory`** — base for all temporal (succession-pattern) entities:
+
+```csharp
+// CabinetMaker.Domain/Entities/CmEntityHistory.cs
+public class CmEntityHistory : CmEntity
+{
+    public DateTime EffectiveDate { get; set; }     // UTC — when this record becomes active
+    public DateTime? ObsoleteDate { get; set; }     // UTC — when this record is superseded
+}
+```
+
+All `DateTime` fields in both classes are **always UTC**. `DateTime.Now` and `DateTime.UtcNow` are never called directly — the current time is always obtained from an injected `TimeProvider` via `_timeProvider.GetUtcNow().DateTime`.
+
+**Key naming on top of the base classes:**
+
+Every entity declares its own named PK and external Guid — the base class does not define them because the name must match the table:
+
+| Property | Type | Purpose |
+|---|---|---|
+| `{TableName}Id` | `int` (auto-increment PK) | Internal DB joins — never exposed in URLs or API responses |
+| `{TableName}Guid` | `Guid` (unique index) | External identifier — used in all UI routes, links, and exports |
+
+`{TableName}Guid` is generated server-side (`Guid.NewGuid()`) in `SaveChangesAsync` on insert — never supplied by the client.
+
+### 3.3 Tenant-Scoped Entities
+
+Every entity that belongs to a tenant implements the marker interface. `TenantId` is an `int` FK to `Tenant.TenantId` — all joins use the int key, not the Guid.
+
+```csharp
+public interface ITenantScoped
+{
+    int TenantId { get; set; }   // FK → Tenant.TenantId (int)
+}
+```
+
+Entities that are **not** tenant-scoped: `Tenant`, `ApplicationUser`, and System Dictionaries (`CmTypeClass`, `CmType`, `CmUnit`).
+
+### 3.3.1 ApplicationUser
+
+ASP.NET Core Identity does not allow renaming the `Id` property, so `ApplicationUser` is an exception to the `{TableName}Id` convention — it retains Identity's `int Id`. A `Guid ApplicationUserGuid` serves the same external-reference purpose.
+
+```csharp
+public class ApplicationUser : IdentityUser<int>   // int PK via Identity
+{
+    public Guid UserGuid { get; set; }             // external reference
+    public int? TenantId { get; set; }             // null = SystemAdmin; FK → Tenant.TenantId
+    public string DisplayName { get; set; } = string.Empty;
+}
+```
+
+Display preferences (timezone, measurement units) live in `UserPreferences` — not on the Identity table.
+
+### 3.3.2 UserPreference
+
+A one-to-many collection of key-value preference rows per user. Adding a new preference type (theme, language, date format, etc.) requires only a new `CmType` seed record — no schema change ever needed.
+
+```csharp
+public class UserPreference : CmEntity
+{
+    public int UserPreferenceId { get; set; }       // PK
+    public Guid UserPreferenceGuid { get; set; }    // external reference
+    public int UserId { get; set; }                 // FK → ApplicationUser.Id
+    public int PreferenceTypeId { get; set; }       // FK → CmType (TimeZone / MeasurementUnit / Theme / etc.)
+    public virtual CmType PreferenceType { get; set; } = null!;
+    public int? TypeInt { get; set; }               // integer preference value
+    public string? TypeString { get; set; }         // string preference value
+    public decimal? TypeDecimal { get; set; }       // decimal preference value
+}
+```
+
+Each preference is one row. Examples:
+
+| `PreferenceType` (`CmType`) | Value field | Example value |
+|---|---|---|
+| `TimeZone` | `TypeString` | `"America/New_York"` |
+| `MeasurementUnit` | `TypeInt` | CmUnitId for inches |
+| `Theme` | `TypeString` | `"dark"` |
+| `DateFormat` | `TypeString` | `"MM/dd/yyyy"` |
+
+At registration, `RegistrationService` seeds the two default rows (`TimeZone = "UTC"`, `MeasurementUnit = null` / system default). All preference rows for a user are loaded once at login and written as claims so the Web layer reads them without a DB hit per request:
+
+```csharp
+foreach (var pref in userPreferences)
+    claims.Add(new Claim($"pref_{pref.PreferenceType.Name}", pref.TypeString ?? pref.TypeInt?.ToString() ?? ""));
+```
+
+### 3.4 User Signup & Tenant Auto-Creation
+
+**A user does not need to pre-create a tenant before signing up.** Self-registration automatically provisions a personal tenant in the same transaction. The user never sees the word "tenant" during signup — it happens silently in the background.
+
+#### Signup flow
+
+```
+User fills in registration form (name, email, password)
+  → RegistrationService.RegisterAsync(command)
+      1. Creates ApplicationUser
+      2. Creates Tenant (name = "{DisplayName}'s Workspace", editable later)
+      3. Assigns user as TenantAdmin of the new tenant
+      4. Sets ApplicationUser.TenantId = new tenant's TenantId
+      5. Seeds default UserPreference rows (TimeZone = "UTC", MeasurementUnit = system default)
+      6. Commits all in a single transaction
+  → User is logged in, lands on their personal workspace
+```
+
+`TenantId` is **never null** except for `SystemAdmin`. There is no "tenantless user" state. This keeps the Global Query Filter uniform — no special-casing for null anywhere in the codebase.
+
+#### Growing from solo to team
+
+Because every self-registered user already has a `Tenant` record, inviting a colleague is just adding another `ApplicationUser` to the same tenant — no data migration, no schema change. The user upgrades from solo to team invisibly.
+
+#### Tenant entity
+
+See full definition in §3.5 — `Tenant` includes `PlanId` for subscription gating.
+
+`TenantGuid` (not `TenantId`) is stored in the JWT claim and in Blazor's auth state — the `int` key never leaves the server.
+
+#### JWT claim strategy
+
+At login, both identifiers are written as claims so `ITenantContext` reads them without a DB lookup per request:
+
+```csharp
+// Claims written at login
+claims.Add(new Claim("tenant_guid", tenant.TenantGuid.ToString()));
+claims.Add(new Claim("tenant_id",   tenant.TenantId.ToString()));   // int, for filter
+```
+
+`ITenantContext` reads `tenant_id` (int) directly for all DB filtering. `tenant_guid` is available for display (e.g., admin UI showing which tenant a SystemAdmin is currently viewing).
+
+Also written as a claim at login:
+
+```csharp
+claims.Add(new Claim("plan_id", tenant.PlanId.ToString())); // int PlanId, for plan gates
+```
+
+This means `IPlanGateService` can check the plan from claims with no DB hit.
+
+### 3.5 Subscription Plans & Feature Gates
+
+A solo maker signs up and works entirely within a single-user experience — no tenant management UI is visible, no invite menus exist. If they later want to bring in employees or partners, they upgrade their plan and those tools unlock automatically. No data migration is required because the tenant record already exists.
+
+#### Plan Schema
+
+Plans use the same three-tier pattern as the material library — identity, temporal pricing detail, and EAV attributes — so adding or modifying a plan tier, changing pricing, or updating the feature bullet list on the marketing page requires no code changes, only data.
+
+```csharp
+// Plan identity — system-level, not tenant-scoped
+public class Plan : CmEntity
+{
+    public int PlanId { get; set; }
+    public Guid PlanGuid { get; set; }
+    public string Name { get; set; } = string.Empty;         // internal: "Solo", "Team"
+    public string Slug { get; set; } = string.Empty;         // url-safe: "solo", "team"
+    public bool IsPubliclyVisible { get; set; }              // show on public pricing page
+    public int SortOrder { get; set; }                       // left→right order on pricing page
+    public virtual ICollection<PlanDetail> Details { get; set; } = new List<PlanDetail>();
+    public virtual ICollection<PlanAttribute> Attributes { get; set; } = new List<PlanAttribute>();
+}
+
+// Temporal pricing + display record — one active row per plan at any instant
+public class PlanDetail : CmEntityHistory   // EffectiveDate, ObsoleteDate — tracks price changes
+{
+    public int PlanDetailId { get; set; }
+    public Guid PlanDetailGuid { get; set; }
+    public int PlanId { get; set; }                          // FK → Plan.PlanId
+    public string DisplayName { get; set; } = string.Empty; // "Solo Maker"
+    public string Tagline { get; set; } = string.Empty;     // "Perfect for independent craftsmen"
+    public decimal MonthlyPrice { get; set; }
+    public decimal? AnnualPrice { get; set; }               // null = no annual billing option
+    public string? PriceDisplayOverride { get; set; }       // "Free" / "Contact Us" — overrides numeric display
+}
+
+// EAV feature bullets — drives the marketing/pricing page, no temporal tracking needed
+public class PlanAttribute : CmEntity
+{
+    public int PlanAttributeId { get; set; }
+    public Guid PlanAttributeGuid { get; set; }
+    public int PlanId { get; set; }                         // FK → Plan.PlanId
+    public int AttributeTypeId { get; set; }                // FK → CmType (UserLimit / JobLimit / Feature / etc.)
+    public virtual CmType AttributeType { get; set; } = null!;
+    public string Label { get; set; } = string.Empty;       // "Active Jobs", "Team Members", "Excel Export"
+    public int? TypeInt { get; set; }                       // e.g. 5 users — null = unlimited
+    public string? TypeString { get; set; }                 // e.g. "Unlimited", "Priority Email Support"
+    public decimal? TypeDecimal { get; set; }
+    public bool IsHighlighted { get; set; }                 // show as a key selling point on the pricing card
+    public int SortOrder { get; set; }                      // display order within the plan's feature list
+}
+```
+
+#### `Tenant` entity (updated)
+
+```csharp
+// Inherits CmEntity: CreatedDate, CreatedUserId, LastUpdatedDate, LastUpdatedUserId, RecordStateId
+public class Tenant : CmEntity               // NOT ITenantScoped
+{
+    public int TenantId { get; set; }         // PK
+    public Guid TenantGuid { get; set; }      // external reference (in JWT claim)
+    public string Name { get; set; } = string.Empty;
+    public string Slug { get; set; } = string.Empty;  // URL-safe, unique
+    public bool IsActive { get; set; } = true;
+    public int PlanId { get; set; }           // FK → Plan.PlanId
+    public virtual Plan Plan { get; set; } = null!;
+    public virtual ICollection<ApplicationUser> Users { get; set; } = new List<ApplicationUser>();
+}
+```
+
+#### `IPlanGateService`
+
+Defined in BRL. Code-level feature gating — checks whether a feature is available on the tenant's current plan. Reads `plan_id` from the JWT claim; no DB hit per request. The `PlanFeature` enum gates code paths; `PlanAttribute` drives what the marketing page displays — these are separate concerns.
+
+```csharp
+public interface IPlanGateService
+{
+    bool IsEnabled(PlanFeature feature);  // reads plan_id from ITenantContext claim
+}
+
+public enum PlanFeature
+{
+    MultiUserInvite,
+    RoleManagement,
+    TenantSettings,
+    // future: AdvancedReporting, ApiAccess, etc.
+}
+```
+
+#### Blazor UI gating
+
+Features locked to a plan are wrapped in a `<PlanGate>` component (thin wrapper around `IPlanGateService`):
+
+```razor
+<PlanGate Feature="PlanFeature.MultiUserInvite">
+    <Authorized>
+        <InviteUserButton />
+    </Authorized>
+    <Upgrade>
+        <UpgradePlanCallToAction />   <!-- shown to Solo users in place of the button -->
+    </Upgrade>
+</PlanGate>
+```
+
+Solo users see an "Upgrade to Team" prompt wherever team features would appear — they are never silently blocked without explanation.
+
+#### Plan upgrade flow
+
+**Phase 1–4 (current):** `SystemAdmin` flips `Tenant.PlanId` manually via the admin panel. No billing integration.
+
+**Future phase:** A self-service upgrade page where the tenant owner can change their own plan. Billing integration (e.g., Stripe) connects here. The core feature-gate logic does not change — only the mechanism that updates `PlanId` changes.
+
+#### Downgrade guard
+
+If a `Team` tenant attempts to downgrade to `Solo` while more than one active user exists, `PlanService.DowngradeAsync` returns a `Result.Failure` with a message listing the blocking users. The tenant must deactivate or remove the extra users before the downgrade is allowed.
+
+### 3.6 Role Hierarchy
+
+| Role | Scope | Capabilities |
+|---|---|---|
+| `SystemAdmin` | Platform-wide | Manage all tenants, change plan tiers, view all data, bypass filters, seed `CmTypeClass` and `CmType` tables. `TenantId = null`. |
+| `TenantAdmin` | Within one tenant | Manage tenant users (Team plan only), configure material library and pricing. Auto-assigned on self-signup. |
+| `TenantUser` | Within one tenant | Create/edit jobs, assemblies, and generate cut lists. |
+
+## 5. Dictionary & Measurement System
+
+The system must be highly flexible, supporting dynamic conversions between metric and imperial systems based on user preference, while storing a canonical source of truth.
+
+### 4.1 System Dictionary Pattern
+
+The system uses a parent-child dictionary pattern for all enumerations, states, and classifications. The `BaseTypeBaseId` acts as the numeric floor. All domain entities link to specific records in `CmType` using a `{Description}TypeId` foreign key convention.
+
+```csharp
+public class CmTypeClass : CmEntity
+{
+    public int CmTypeClassId { get; set; }         // PK
+    public Guid CmTypeClassGuid { get; set; }      // external reference
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int BaseTypeId { get; set; }         // numeric floor e.g. 1000, 2000
+    public virtual ICollection<CmType> Types { get; set; } = new List<CmType>();
+}
+
+public class CmType : CmEntity
+{
+    public int CmTypeId { get; set; }               // PK e.g. 1001, 1002
+    public Guid CmTypeGuid { get; set; }            // external reference
+    public int CmTypeClassId { get; set; }          // FK → CmTypeClass.CmTypeClassId
+    public virtual CmTypeClass TypeClass { get; set; } = null!;
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int Ordering { get; set; }               // display sort order within the class
+    public int? TypeInt { get; set; }               // optional typed payload — integer value
+    public string? TypeString { get; set; }         // optional typed payload — string value
+    public decimal? TypeDecimal { get; set; }       // optional typed payload — decimal value
+}
+```
+
+### 4.2 Universal Measurement Engine
+
+All physical dimensions, mass, and volume flow through a dynamic conversion engine. `CmUnit` defines the conversion logic, and `CmMeasurement` acts as the universal storage table, compressing repeated measurements.
+
+```csharp
+public class CmUnit : CmEntity
+{
+    public int CmUnitId { get; set; }               // PK
+    public Guid CmUnitGuid { get; set; }            // external reference
+    public string Name { get; set; } = string.Empty;
+    public string Abbreviation { get; set; } = string.Empty;
+    public int CmTypeId { get; set; }               // FK → CmType.CmTypeId (Length/Mass/etc.)
+    public virtual CmType UnitType { get; set; } = null!;
+    public bool IsSystemBase { get; set; }
+    public decimal BaseMultiplier { get; set; }
+    public int DisplayPrecision { get; set; }
+}
+
+public class CmMeasurement : CmEntity
+{
+    public int CmMeasurementId { get; set; }        // PK
+    public Guid CmMeasurementGuid { get; set; }     // external reference
+    public decimal RawValue { get; set; }
+    public int CmUnitId { get; set; }               // FK → CmUnit.CmUnitId
+    public virtual CmUnit Unit { get; set; } = null!;
+}
+```
+
+## 6. Core Domain Schema
+
+### 5.1 Material Library — System Base + Tenant Override Pattern
+
+The material library uses a **two-tier ownership model** with full temporal history at both tiers.
+
+#### Ownership Tiers
+
+| Tier | Entity | Owner | Tenant-Scoped |
+|---|---|---|---|
+| System base — identity | `Material` | `SystemAdmin` | No |
+| System base — pricing history | `MaterialDetail` | `SystemAdmin` | No |
+| System base — attributes (EAV) | `MaterialAttribute` | `SystemAdmin` | No |
+| Tenant pricing history | `MaterialTenantDetail` | `TenantAdmin` | Yes |
+| Tenant attribute overrides (EAV) | `MaterialTenantAttribute` | `TenantAdmin` | Yes |
+
+**Tenant-created materials** (no system counterpart) use the same tables but with `IsSystemMaterial = false` on `Material` and a `TenantId` set. All their `MaterialDetail` and `MaterialAttribute` rows are their own — they do not inherit from any system record.
+
+Effective library for a tenant = *system materials (with any tenant overrides applied)* + *tenant-created materials*.
+
+#### Schema
+
+```csharp
+// System-owned — NOT ITenantScoped
+public class Material : CmEntity
+{
+    public int MaterialId { get; set; }             // PK
+    public Guid MaterialGuid { get; set; }          // external reference
+    public bool IsSystemMaterial { get; set; }      // false = tenant-created
+    public int? TenantId { get; set; }              // null when IsSystemMaterial = true
+    public int MaterialCategoryTypeId { get; set; } // FK → CmType.CmTypeId
+    public bool HasGrainDirection { get; set; }
+    public ICollection<MaterialDetail> Details { get; set; }
+    public ICollection<MaterialAttribute> Attributes { get; set; }
+}
+
+// System temporal pricing chain — one row per pricing period
+public class MaterialDetail : CmEntityHistory      // provides EffectiveDate, ObsoleteDate
+{
+    public int MaterialDetailId { get; set; }       // PK
+    public Guid MaterialDetailGuid { get; set; }    // external reference
+    public int MaterialId { get; set; }             // FK → Material.MaterialId
+    public string Name { get; set; }
+    public decimal UnitCost { get; set; }
+    public decimal WasteFactorPercentage { get; set; }
+}
+
+// System EAV attributes
+public class MaterialAttribute : CmEntity
+{
+    public int MaterialAttributeId { get; set; }    // PK
+    public Guid MaterialAttributeGuid { get; set; } // external reference
+    public int MaterialId { get; set; }             // FK → Material.MaterialId
+    public int AttributeTypeId { get; set; }        // FK → CmType.CmTypeId
+    public int? CmMeasurementId { get; set; }       // FK → CmMeasurement.CmMeasurementId
+    public string? StringValue { get; set; }
+}
+
+// Tenant temporal pricing chain — one row per pricing period per tenant
+// null override field = "not overridden, inherit from system"
+public class MaterialTenantDetail : CmEntityHistory, ITenantScoped  // provides EffectiveDate, ObsoleteDate
+{
+    public int MaterialTenantDetailId { get; set; }     // PK
+    public Guid MaterialTenantDetailGuid { get; set; }  // external reference
+    public int TenantId { get; set; }                   // FK → Tenant.TenantId (int)
+    public int MaterialId { get; set; }                 // FK → Material.MaterialId
+    public bool IsHidden { get; set; }
+    public string? OverrideName { get; set; }           // null = inherit system value
+    public decimal? OverrideUnitCost { get; set; }
+    public decimal? OverrideWasteFactorPercentage { get; set; }
+}
+
+// Tenant EAV attribute overrides — full replacement of a single attribute slot
+public class MaterialTenantAttribute : CmEntityHistory, ITenantScoped  // provides EffectiveDate, ObsoleteDate
+{
+    public int MaterialTenantAttributeId { get; set; }      // PK
+    public Guid MaterialTenantAttributeGuid { get; set; }   // external reference
+    public int TenantId { get; set; }                       // FK → Tenant.TenantId (int)
+    public int MaterialId { get; set; }                     // FK → Material.MaterialId
+    public int AttributeTypeId { get; set; }                // FK → CmType.CmTypeId
+    public int? CmMeasurementId { get; set; }               // FK → CmMeasurement.CmMeasurementId
+    public string? StringValue { get; set; }
+}
+```
+
+#### Resolution Rules (`MaterialResolutionService`)
+
+All resolution accepts an `asOfDate` parameter (defaults to `_timeProvider.GetUtcNow().DateTime`). This enables historical pricing reports.
+
+**Pricing resolution** for a given material + tenant + date:
+1. Find the active `MaterialTenantDetail` row (tenant, material, `EffectiveDate <= asOfDate`, `ObsoleteDate` null or `> asOfDate`).
+2. If found: use it. For any nullable field that is null, fall back to the active system `MaterialDetail` value for the same date.
+3. If not found: use the active system `MaterialDetail` row directly.
+
+**Attribute resolution** for a given material + tenant + date:
+1. Start with all `MaterialAttribute` rows for the material (system set).
+2. For each attribute slot (`AttributeTypeId`): if an active `MaterialTenantAttribute` exists for that tenant and date, replace the system value with the tenant value.
+3. Tenant may also have `MaterialTenantAttribute` rows for attribute slots that don't exist in the system set — these are additive (tenant-only attributes).
+
+**System update propagation behavior:**
+- Tenant has **no** `MaterialTenantDetail` row → system updates are immediately visible. Full system history is visible in reports.
+- Tenant has a `MaterialTenantDetail` row with a specific field overridden → that field is frozen at the tenant's value. Other non-overridden fields still inherit system updates.
+- Tenant can "reset a field to system" by setting the override field back to null.
+- Tenant can "reset entirely" by deleting their `MaterialTenantDetail` rows.
+
+#### History & Reporting
+
+Because both tiers are temporal (effective/obsolete dates), reports can answer:
+- "What did *we* pay for 3/4" maple plywood in Q3?" → query `MaterialTenantDetail` as-of Q3
+- "What is the system reference price for that material in Q3?" → query `MaterialDetail` as-of Q3
+- "Show me the price drift between system and our overrides over the last 12 months" → join both chains
+
+#### Temporal Succession Pattern
+
+All `*Detail` and `*Attribute` records — both system and tenant — follow the same succession contract:
+
+> For any given logical record key (e.g., `(TenantId, MaterialId, AttributeTypeId)`), exactly one row is active at any instant. The outgoing row's `ObsoleteDate` equals the incoming row's `EffectiveDate` — a shared boundary point with no gap and no overlap.
+
+```
+Timeline ──────────────────────────────────────────────────▶
+         |← Row A active ────────────|← Row B active ──────
+         EffA                        ObsA == EffB
+```
+
+**Succession operation** (handled atomically by `RecordSuccessionService`):
+
+1. Caller provides: the new record's data + an `effectiveAt` (`DateTime` UTC).
+2. Service finds the currently active row for that key.
+3. Sets `existing.ObsoleteDate = effectiveAt`.
+4. Sets `newRecord.EffectiveDate = effectiveAt`, `newRecord.ObsoleteDate = null`.
+5. Saves both in a single transaction.
+
+**Future-dated succession** (scheduled material change):
+
+```
+Today (Oct 10):  Row A has ObsoleteDate = Nov 1 05:00 UTC
+                 Row B has EffectiveDate = Nov 1 05:00 UTC, ObsoleteDate = null
+
+Before Nov 1:    Query resolves Row A  (ObsoleteDate > now)
+After Nov 1:     Query resolves Row B  (EffectiveDate <= now, ObsoleteDate is null)
+```
+
+The user entered "Nov 1 midnight Eastern" — the UI converted this to `2026-11-01T05:00:00+00:00` before sending the command. The server stores and queries UTC only.
+
+**Validation rules enforced by `RecordSuccessionService`:**
+- `effectiveAt` must be ≥ `_timeProvider.GetUtcNow().DateTime` minus a small grace window (prevents accidental back-dating).
+- If a future-dated successor already exists, the new `effectiveAt` must be before the existing successor's `EffectiveDate` (no insertion into the middle of a chain without explicit intent).
+- Gaps and overlaps are structurally prevented — the service is the only permitted write path for temporal records.
+
+**`RecordSuccessionService`** lives in BRL and is generic over any entity that implements `ITemporalRecord`:
+
+```csharp
+public interface ITemporalRecord
+{
+    DateTime EffectiveDate { get; set; }     // mirrors CmEntityHistory — always UTC
+    DateTime? ObsoleteDate { get; set; }
+}
+```
+
+`CmEntityHistory` already satisfies this interface structurally. Declaring it explicitly on `CmEntityHistory` allows `RecordSuccessionService` to work generically over any temporal entity.
+
+### 5.2 Job & Assembly Hierarchy
+
+The physical workflow of the shop, moving from the client project container down to the individual cuts.
+
+```csharp
+public class Job : CmEntity, ITenantScoped
+{
+    public int JobId { get; set; }                  // PK
+    public Guid JobGuid { get; set; }               // external reference
+    public int TenantId { get; set; }               // FK → Tenant.TenantId (int)
+    public string Name { get; set; } = string.Empty;
+    public string? ClientName { get; set; }
+    public string? ClientContact { get; set; }      // email or phone — freeform
+    public int JobStatusTypeId { get; set; }        // FK → CmType (Draft/Quoted/Approved/InProgress/Completed)
+    public virtual CmType JobStatusType { get; set; } = null!;
+    public DateTime? TargetDate { get; set; }       // UTC — target completion/delivery date
+    public string? Notes { get; set; }
+    public virtual ICollection<Assembly> Assemblies { get; set; } = new List<Assembly>();
+    public virtual ICollection<JobEstimate> Estimates { get; set; } = new List<JobEstimate>();
+}
+
+public class Assembly : CmEntity, ITenantScoped
+{
+    public int AssemblyId { get; set; }             // PK
+    public Guid AssemblyGuid { get; set; }          // external reference
+    public int TenantId { get; set; }               // FK → Tenant.TenantId (int)
+    public int JobId { get; set; }                  // FK → Job.JobId
+    public string Name { get; set; } = string.Empty;
+    public int OverallHeightMeasurementId { get; set; }  // FK → CmMeasurement.CmMeasurementId
+    public int OverallWidthMeasurementId { get; set; }
+    public int OverallDepthMeasurementId { get; set; }
+    public virtual ICollection<Part> Parts { get; set; } = new List<Part>();
+}
+
+public class Part : CmEntity, ITenantScoped
+{
+    public int PartId { get; set; }                 // PK
+    public Guid PartGuid { get; set; }              // external reference
+    public int TenantId { get; set; }               // FK → Tenant.TenantId (int)
+    public int AssemblyId { get; set; }             // FK → Assembly.AssemblyId
+    public string Name { get; set; } = string.Empty;
+    public int Quantity { get; set; } = 1;
+    public int CutLengthMeasurementId { get; set; } // FK → CmMeasurement.CmMeasurementId
+    public int CutWidthMeasurementId { get; set; }
+    public int MaterialId { get; set; }             // FK → Material.MaterialId
+    public virtual Material Material { get; set; } = null!;
+    public virtual ICollection<PartOperation> Operations { get; set; } = new List<PartOperation>();
+}
+```
+
+### 5.3 Machining Operations (JSONb)
+
+Joinery and tool paths are decoupled. Dimensions are serialized as strongly-typed JSON.
+
+```csharp
+public class PartOperation : CmEntity
+{
+    public int PartOperationId { get; set; }        // PK
+    public Guid PartOperationGuid { get; set; }     // external reference
+    public int PartId { get; set; }                 // FK → Part.PartId
+    public virtual Part Part { get; set; } = null!;
+    public int OperationTypeId { get; set; }        // FK → CmType.CmTypeId (Dado/Dowel/etc.)
+    public virtual CmType OperationType { get; set; } = null!;
+    public PartFace Face { get; set; }
+    public string OperationParametersJson { get; set; } = string.Empty;
+}
+```
+
+### 5.4 Estimator
+
+Estimates are generated from the job hierarchy with zero required configuration — system defaults cover everything out of the box. Tenants tune the macro knobs (shop rate, markup) in their settings when they're ready for accuracy.
+
+#### Estimate math
+
+```
+For each Part (× Quantity):
+  Material cost  = sheet yield from CutLength × CutWidth
+                   → MaterialResolutionService (as-of today) → unit cost × waste factor
+  Operation time = Σ PartOperation.OperationType.TypeDecimal (hours/op seeded on CmType)
+                   × Quantity
+
+Total material  = Σ all part material costs
+Total hours     = Σ all part operation hours
+Total labor     = Total hours × TenantSettings.ShopHourlyRate
+Subtotal        = Total material + Total labor
+Total           = Subtotal × (1 + TenantSettings.DefaultMarkupPercentage)
+```
+
+Operation types (Dado, Dowel, Rabbet, Door Hang, etc.) are seeded as `CmType` records with `TypeDecimal` = estimated hours per operation. Tenants adjust their `TenantSettings` to reflect their actual shop speed and rates.
+
+#### TenantSettings
+
+One row per tenant, automatically seeded from system defaults when the tenant is created via `RegistrationService`. Tenants never have to configure this to get a working estimate — the defaults produce a ballpark number immediately.
+
+```csharp
+public class TenantSettings : CmEntity   // NOT ITenantScoped — owns TenantId directly
+{
+    public int TenantSettingsId { get; set; }    // PK
+    public Guid TenantSettingsGuid { get; set; } // external reference
+    public int TenantId { get; set; }            // FK → Tenant.TenantId (1:1)
+    public decimal ShopHourlyRate { get; set; }  // labor rate per hour
+    public decimal DefaultMarkupPercentage { get; set; }  // e.g. 0.20 = 20%
+    public decimal DefaultMarginPercentage { get; set; }  // informational — for margin-based pricing
+}
+```
+
+System default seed values (adjustable by `SystemAdmin`):
+
+| Setting | Default |
+|---|---|
+| `ShopHourlyRate` | 75.00 |
+| `DefaultMarkupPercentage` | 0.20 (20%) |
+| `DefaultMarginPercentage` | 0.15 (15%) |
+
+#### JobEstimate & JobEstimateLine
+
+Estimates are saved as versioned snapshots so the tenant can send v1 to a client, revise, send v2, and keep both on record. All rate values are snapshotted at generation time — changing `TenantSettings` later does not retroactively alter a saved estimate.
+
+Estimates follow a **draft → shipped** lifecycle. A draft is fully editable — generated values are starting points, not locked figures. Once shipped, the estimate becomes an immutable versioned record. A new revision starts a fresh draft generated from the current job state.
+
+```
+GenerateAsync  →  Draft (no version, fully editable)
+  ↓ user edits lines, adjusts costs, adds hardware/misc lines
+ShipAsync      →  Sent (version stamped, locked — no further edits)
+  ↓ need to revise?
+GenerateAsync  →  new Draft (version = null, prior Sent records untouched)
+```
+
+```csharp
+public class JobEstimate : CmEntity, ITenantScoped
+{
+    public int JobEstimateId { get; set; }        // PK
+    public Guid JobEstimateGuid { get; set; }     // external reference
+    public int TenantId { get; set; }             // FK → Tenant.TenantId (int)
+    public int JobId { get; set; }                // FK → Job.JobId
+    public int EstimateStatusTypeId { get; set; } // FK → CmType (Draft / Sent / Void)
+    public virtual CmType EstimateStatusType { get; set; } = null!;
+    public int? Version { get; set; }             // null while Draft; auto-incremented per job on Ship
+    public DateTime GeneratedAt { get; set; }     // UTC — when first generated
+    public DateTime? SentAt { get; set; }         // UTC — when shipped (null while Draft)
+    public decimal ShopHourlyRate { get; set; }   // from TenantSettings at generation — for reference
+    public decimal MarkupPercentage { get; set; } // from TenantSettings at generation — for reference
+    public decimal TotalCost { get; set; }        // kept in sync with line sum on every save
+    public string? Notes { get; set; }
+    public virtual ICollection<JobEstimateLine> Lines { get; set; } = new List<JobEstimateLine>();
+}
+
+public class JobEstimateLine : CmEntity, ITenantScoped
+{
+    public int JobEstimateLineId { get; set; }        // PK
+    public Guid JobEstimateLineGuid { get; set; }     // external reference
+    public int TenantId { get; set; }                 // FK → Tenant.TenantId (int)
+    public int JobEstimateId { get; set; }            // FK → JobEstimate.JobEstimateId
+    public int? PartId { get; set; }                  // null for manually added hardware/misc/discount lines
+    public int? TenantDiscountCodeId { get; set; }    // FK → TenantDiscountCode — null for non-discount lines
+    public int LineTypeId { get; set; }               // FK → CmType (Material / Labor / Hardware / Misc / Discount)
+    public virtual CmType LineType { get; set; } = null!;
+    public string Description { get; set; } = string.Empty;
+    public decimal Quantity { get; set; }
+    public decimal UnitCost { get; set; }             // negative for discount lines
+    public decimal TotalCost { get; set; }            // Quantity × UnitCost — recalculated on save
+    public int SortOrder { get; set; }                // user-controlled display order
+}
+```
+
+#### TenantDiscountCode
+
+Tenant-created codes applied during estimate editing. The tenant controls all configuration — code string, discount type, value, expiry, and usage limits. Usage is tracked per shipped estimate (Draft applications do not count against limits).
+
+```csharp
+public class TenantDiscountCode : CmEntity, ITenantScoped
+{
+    public int TenantDiscountCodeId { get; set; }    // PK
+    public Guid TenantDiscountCodeGuid { get; set; } // external reference
+    public int TenantId { get; set; }                // FK → Tenant.TenantId (int)
+    public string Code { get; set; } = string.Empty; // unique per tenant — e.g. "SUMMER25"
+    public string Description { get; set; } = string.Empty; // appears on the estimate line
+    public int DiscountTypeId { get; set; }          // FK → CmType (Percentage / FixedAmount)
+    public virtual CmType DiscountType { get; set; } = null!;
+    public decimal DiscountValue { get; set; }       // 0.10 = 10% off  |  50.00 = $50 off
+    public DateTime? ExpiresAt { get; set; }         // UTC — null = no expiry
+    public int? MaxUses { get; set; }                // null = unlimited
+    public int UsageCount { get; set; }              // incremented by ShipAsync, decremented if Voided
+}
+```
+
+**Discount application rules:**
+- Percentage discount: `TotalCost = -(estimate subtotal × DiscountValue)` — applied against the sum of all non-discount lines
+- Fixed amount: `TotalCost = -DiscountValue`
+- Multiple codes can be stacked on one estimate — each is its own `JobEstimateLine`
+- `EstimatorService.ApplyDiscountAsync(estimateGuid, code)` looks up the code, validates it (not expired, under max uses), creates the discount line, and recalculates `JobEstimate.TotalCost`
+- `UsageCount` is incremented in `ShipAsync` for every discount line on the estimate; decremented in `VoidAsync`
+- Codes are validated against `ExpiresAt` and `MaxUses` at apply time — a code that was valid when applied but expires before shipping is still honoured (validation is at apply time, not ship time)
+
+**Editing rules:**
+- Any field on `JobEstimateLine` is editable while `EstimateStatusTypeId == Draft`
+- Lines can be added (hardware, misc, custom, discount) or removed while in Draft
+- `JobEstimate.TotalCost` is recalculated as the sum of all `JobEstimateLine.TotalCost` on every save
+- `EstimatorService.ShipAsync(estimateGuid)` flips status to Sent, assigns the next version number for that job, stamps `SentAt`, increments `UsageCount` on all applied discount codes — no edits permitted after this point
+- `JobEstimateLine.TotalCost` is enforced server-side (`Quantity × UnitCost`) — the client sends `Quantity` and `UnitCost`, the server always recalculates `TotalCost`
+
+#### EstimatorService (BRL)
+
+| Method | Description |
+|---|---|
+| `GenerateAsync(jobId)` | Creates a Draft estimate from current job state. Resolves materials via `MaterialResolutionService`, calculates sheet yield, sums operation hours from `CmType.TypeDecimal`, reads `TenantSettings` for rates. Returns `Result<Guid>`. |
+| `ApplyDiscountAsync(estimateGuid, code)` | Looks up code (must be Draft, not expired, under max uses), creates a Discount `JobEstimateLine`, recalculates total. Returns `Result<Guid>` (line Guid). |
+| `ShipAsync(estimateGuid)` | Locks estimate — stamps version, `SentAt`, increments `UsageCount` on all discount codes. Returns `Result<Guid>`. |
+| `VoidAsync(estimateGuid)` | Voids a Sent estimate — decrements `UsageCount` on all discount codes. Returns `Result<Guid>`. |
+
+## 7. Data Access Layer (DAL)
+
+`CabinetMakerDbContext` configuration:
+
+1. **Soft Deletes:** `modelBuilder.Entity<T>().HasQueryFilter(e => e.RecordStateId == 1000);`
+
+2. **Tenant Isolation:** `modelBuilder.Entity<ITenantScoped>().HasQueryFilter(e => _tenantContext.IsSystemAdmin || e.TenantId == _tenantContext.TenantId);` — `TenantId` is `int` on both sides; no Guid comparison in hot-path queries.
+
+3. **JSON Mapping:** `PartOperation.OperationParametersJson` maps to MySQL `JSON` column (Pomelo) or `nvarchar(max)` with JSON constraint on SQL Server. Provider-specific column type is set in the `DatabaseProviderExtensions` configuration.
+
+4. **Cascade Protection:** `DeleteBehavior.Restrict` on `MaterialId` and `CmMeasurement` references to prevent cascade loops.
+
+5. **Auto-Stamping:** Overrides `SaveChangesAsync` to ensure `TenantId` is stamped on all inserted `ITenantScoped` entities.
+
+## 8. Business Rules Layer (BRL)
+
+* **`RegistrationService`**: Handles self-signup. Creates `ApplicationUser`, auto-creates `Tenant` (with `Solo` plan), assigns `TenantAdmin` role, copies system default `MeasurementPreference` to the new tenant — all in a single transaction. Also used by `SystemAdmin` when provisioning a new tenant manually.
+
+* **`PlanService`**: Handles plan upgrades and downgrades. `UpgradeAsync` updates `Tenant.PlanTypeId`. `DowngradeAsync` validates no blocking conditions (e.g., multiple active users when downgrading to Solo) before applying.
+
+* **`IPlanGateService`** / **`ClaimsPlanGateService`**: Reads `tenant_plan` claim and evaluates `PlanFeature` flags. Zero DB hits — all reads from claims.
+
+* **`MeasurementConversionService`**: Converts values dynamically based on `BaseMultiplier` math.
+
+* **`MaterialResolutionService`**: The single point of material resolution. Accepts `(materialId, tenantId, asOfDate)` and returns a fully merged `EffectiveMaterial` projection — active pricing from the deepest available tier (tenant override or system fallback), with all EAV attributes resolved in the same way. All services that consume material data call this service; no consumer queries `Material`, `MaterialDetail`, or `MaterialAttribute` directly. Supports historical as-of queries so reports can reconstruct what the effective material looked like on any past date.
+
+* **`CutListService`**: Generates cut lists from Assemblies, parsing `PartOperation` JSON to factor in joinery deductions (e.g., dado depths).
+
+* **`EstimatorService`**: Two entry points — `GenerateAsync(jobId)` creates a Draft estimate (fully editable), `ShipAsync(estimateGuid)` locks it as a versioned snapshot. `GenerateAsync` resolves material costs via `MaterialResolutionService`, calculates sheet yield, sums operation hours from `CmType.TypeDecimal`, and applies `TenantSettings` rates to populate initial line values. Lines are editable by the user before shipping. `ShipAsync` stamps the next version number for the job, sets `SentAt`, and makes the record immutable. Both return `Result<Guid>`.
+
+* **Validation**: Uses FluentValidation for all entities/commands.
+
+* **Result Pattern**: Services return `Result<T>` instead of throwing business logic exceptions.
+
+## 9. Web / UI Layer
+
+### 8.1 Blazor & MVVM
+
+* **Render Mode:** Interactive Server.
+
+* **MVVM:** Uses `CommunityToolkit.Mvvm` (`ObservableObject`, `[RelayCommand]`).
+
+* **Component Base:** `ViewModelComponentBase<TViewModel>` bridges `PropertyChanged` to `StateHasChanged()`.
+
+* **UI Framework:** Bootstrap 5.x via LibMan.
+
+### 8.2 Fractional Snapping
+
+The UI layer enforces fractional snapping to ensure woodworkers see usable measurements.
+`MeasurementFormatter.ToTapeMeasureFraction(decimal rawInches, int precision = 16)` converts high-precision DB decimals into standard tape-measure fractions (e.g., `1.1811` -> `1 3/16"`).
+
+## 10. Implementation Phases
+
+### Phase 1 — Foundation (Tenancy, Identity, Dictionary Schema, Infrastructure)
+
+* \[x\] `Dockerfile` (multi-stage, .NET 10 SDK → ASP.NET runtime) + `docker-compose.yml` (web + MySQL + dbgate).
+
+* \[x\] `DatabaseProviderExtensions` — MySQL (Oracle official provider, `SslMode=Disabled`) and SQL Server provider switching via config key `"DatabaseProvider"`.
+
+* \[x\] `CabinetMaker.Domain.Shared` project created — settings DTOs, configuration POCOs. *(Note: POCO isolation layer per D19/D20 not yet applied — EF entities still flow into BRL/Web. Deferred.)*
+
+* \[x\] Base entities (`CmEntity`, `CmEntityHistory`), `ITenantScoped` interface, `RecordStateId` soft-delete field on all entities.
+
+* \[x\] ASP.NET Core Identity & Role setup — `AddIdentityCore` pattern (not `AddIdentity`); roles `Admin`, `TenantAdmin`, `User` seeded.
+
+* \[x\] `DbSeeder` — seeds admin account from config; seeds `CmTypeClass` (RecordState, UnitType), `CmType` (Active/Deleted/Archived/Length), and `CmUnit` (in, ft, mm, cm, m).
+
+* \[x\] `TimeProvider.System` registered as singleton; all time access via `_time.GetUtcNow().UtcDateTime` (`.UtcDateTime` not `.DateTime` — preserves `DateTimeKind.Utc`).
+
+* \[x\] EF global `DateTime` UTC value converter — enforces `DateTimeKind.Utc` on all `DateTime` properties, throws on write if Kind is not Utc.
+
+* \[x\] `ApplicationUser.TimeZoneId` (IANA string, default `"UTC"`) — added to `User` entity, migration `AddUserTimeZoneId` created.
+
+* \[x\] Core dictionary schema (`CmTypeClass`, `CmType`) — seeded with enums (`RecordStateTypeId`, `UnitTypeId`, `TypeClassId`) — no magic numbers.
+
+* \[x\] Measurement schema (`CmUnit`, `CmMeasurement`), `IMeasurementService` + `MeasurementService` (BaseMultiplier conversion engine), `FractionHelper` (fractional inch snapping, GCD simplification, 1/8–1/64 precision).
+
+* \[x\] `BaseRepository<T>` wired to `CmContext` — real EF implementations; `GetAllAsync`/`GetAsync` filter to active records only; `DeleteAsync` is soft-delete (sets `RecordStateId = Deleted`).
+
+* \[x\] DbContext Global Query Filters — soft delete (`RecordStateId == Active`) on all `CmEntity` subtypes; tenant isolation (`IsSystemAdmin || TenantId == current`) on all `ITenantScoped` subtypes. `TenantContext` scoped holder set by `TenantContextMiddleware` (SSR) and `CircuitTenantContextHandler` (Interactive Server). `BaseRepository` filters removed — DbContext is now the single enforcement point.
+
+* \[x\] `IUnitOfWork` + `UnitOfWork` (scoped) with `RepositoryTypeMap` singleton — scans the DAL assembly once at startup to build a `Dictionary<Type entityType, Type repoType>`, resolves specific repos via `ActivatorUtilities.CreateInstance`, falls back to `BaseRepository<TEntity>` for entities without a custom class. Eliminates individual `IRepository<T>` DI registrations. See D23.
+
+* \[x\] Auto-migration on startup — `context.Database.MigrateAsync()` in `Program.cs` startup scope, runs before `DbSeeder`. All migrations applied automatically on every app start; no manual `dotnet ef database update` step in dev or production.
+
+### Phase 2 — Core Domain (Material EAV & Job Hierarchy)
+
+* \[x\] Material system library engine — `CmMaterial` (Guid, IsSystemMaterial, MaterialCategoryTypeId, HasGrainDirection, optional TenantId), `CmMaterialDetail` (temporal: Name, UnitCost, WasteFactorPercentage, EffectiveDate/ObsoleteDate), `CmMaterialAttribute` (EAV: AttributeTypeId, MeasurementId, StringValue, BoolValue). Typo in PK fixed (`CmMaterialAttributreId` → `CmMaterialAttributeId`); `CmMaterialAttribute` now extends `CmEntity` (was missing base class). Nav properties on all three.
+
+* \[x\] Tenant override engine — `MaterialTenantDetail` (ITenantScoped, temporal, nullable override fields) and `MaterialTenantAttribute` (ITenantScoped, temporal) entities complete. DB-level tenant isolation via global query filter.
+
+* \[x\] `MaterialCategoryTypeId` enum (SheetGood=3000, SolidWood=3001, Hardware=3002, Finish=3003); `TypeClassId` updated (MaterialCategory=3). `DbSeeder` seeds MaterialCategory TypeClass + 4 CmType entries + 5 starter system materials (Maple Plywood, Birch Plywood, MDF, Hard Maple, Red Oak) with EffectiveDate and 10% default waste factor.
+
+* \[x\] `RecordSuccessionService` — generic temporal succession over any `CmEntityHistory` entity. `GetEffectiveAsync<TDetail>` finds active record as-of date. `SucceedAsync<TDetail>` closes previous open record (sets ObsoleteDate), adds new detail. Uses IUnitOfWork internally — no repo passed by caller.
+
+* \[x\] `MaterialResolutionService` — resolves `EffectiveMaterialPoco` for a given materialId and date. Applies tenant override chain (MaterialTenantDetail scoped automatically by DbContext filter). `ResolveAllAsync` returns full visible library, excluding hidden materials.
+
+* \[x\] `IMaterialService` + `MaterialService` — `CreateMaterialAsync` (stamps Guid, Active state, sets EffectiveDate); `UpdateDetailAsync` (calls SucceedAsync for temporal succession); `DeleteMaterialAsync` (soft delete via UoW).
+
+* \[x\] `EffectiveMaterialPoco` — resolved view with computed `ResolvedName`, `ResolvedUnitCost`, `ResolvedWasteFactor` that apply tenant overrides over system values.
+
+* \[x\] EF migration `MaterialSystem` created and applied to dev MySQL database.
+
+* \[ \] Hierarchy (`Job`, `Assembly`, `Part`, `PartOperation`).
+
+* \[ \] EF Core JSON mapping for `PartOperation` parameters.
+
+* \[ \] `TenantSettings` entity — seeded from system defaults in `RegistrationService`.
+
+* \[ \] `JobEstimate` + `JobEstimateLine` entities.
+
+* \[ \] `TenantDiscountCode` entity.
+
+### Phase 3 — UI Shell + Auth + Measurement Tools
+
+* \[x\] Layout, NavMenu, MainLayout with top-row user display + logout button.
+
+* \[x\] Full SSR authentication flow — Login, MFA challenge (TOTP), MFA enrollment (QR code + recovery codes), Disable 2FA, 2FA management page. `[ExcludeFromInteractiveRouting]` + `AuthLayout` pattern. No `@rendermode` on `<Routes />` in App.razor.
+
+* \[x\] `RevalidatingServerAuthenticationStateProvider` — 30-minute security stamp revalidation.
+
+* \[x\] MFA reminder alert — interactive island in MainLayout using `IServiceScopeFactory` pattern.
+
+* \[x\] Measurement Converter page (`/tools/measurement-converter`) — decimal conversion + fractional inch display, 1/8–1/64 precision radio selector, all-units table, swap button.
+
+* \[ \] `CommunityToolkit.Mvvm` integration. *(Pending)*
+
+* \[ \] `ITimezoneService` / `NodaTimeTimezoneService` — UTC ↔ user-local conversion. *(Pending)*
+
+* \[ \] JS interop for browser IANA timezone detection on session start. *(Pending)*
+
+* \[ \] `DateTimeInput` component — displays UTC `DateTime` values in user's local timezone; submits UTC. *(Pending)*
+
+* \[ \] `/upgrade` page — `RedirectToUpgrade` component references it but page not yet created. *(Pending)*
+
+### Phase 4 — Feature Pages
+
+* \[ \] Tenant Management (SystemAdmin only).
+
+* \[ \] Material Library Manager (handling EAV attributes and temporal details).
+
+* \[ \] Job & Assembly Editor.
+
+* \[ \] Cut List Generator — on-screen paginated table report.
+
+* \[ \] Cut List Excel Export (`ClosedXML` — one sheet per assembly, totals row, formatted columns).
+
+* \[ \] Estimate Generator — `EstimatorService.GenerateAsync` creates editable Draft; `ShipAsync` locks and versions.
+
+* \[ \] Estimate detail page — inline-editable line items (Draft only); Add Line / Remove Line; Ship button.
+
+* \[ \] Estimate + Material cost report — on-screen + Excel export.
+
+* \[ \] Tenant Settings page — shop rate, markup, margin.
+
+* \[ \] Discount Code Manager — create/edit/deactivate codes, view usage count.
+
+## 11. NuGet Package Plan
+
+| Project | Package | Purpose |
+|---|---|---|
+| Domain | *(none)* | Pure C# — no external dependencies |
+| Domain.Shared | `Riok.Mapperly` | POCO→POCO mapping source generator (`PrivateAssets="all"` — no runtime DLL) |
+| DAL | `MySql.EntityFrameworkCore` | MySQL provider (primary) — Oracle official |
+| DAL | `Microsoft.EntityFrameworkCore.SqlServer` | SQL Server provider (secondary) |
+| DAL | `Microsoft.AspNetCore.Identity.EntityFrameworkCore` | Identity tables |
+| DAL | `Riok.Mapperly` | Entity→POCO mapping source generator (`PrivateAssets="all"` — no runtime DLL) |
+| BRL | `FluentValidation` | Entity/command validation |
+| BRL | `FluentValidation.DependencyInjectionExtensions` | DI auto-registration |
+| Web | `CommunityToolkit.Mvvm` | MVVM source generators (`[ObservableProperty]`, `[RelayCommand]`) |
+| Web | `Microsoft.AspNetCore.Components.Authorization` | `AuthorizeView`, policy enforcement in Blazor |
+| Web | `ClosedXML` | Excel export for cut lists and material estimates |
+| Web | `NodaTime` | IANA timezone conversions, DST-correct date math |
+| Web | `TimeZoneConverter` | Maps Windows ↔ IANA timezone IDs (handles clients that send Windows names) |
+| Tests | `Microsoft.Extensions.TimeProvider.Testing` | `FakeTimeProvider` — set and advance the clock in unit/integration tests |
+
+---
+
+## 12. Decided — Architecture Decisions Log
+
+| # | Decision | Choice |
+|---|---|---|
+| D1 | Deployment target | Docker container, Linux host — any Docker-compatible platform |
+| D2 | Primary database | MySQL 8.x (Pomelo EF provider); SQL Server also supported via provider switch |
+| D3 | Local dev database | MySQL in docker-compose (matches production, no LocalDB dependency) |
+| D4 | Cut list output | On-screen paginated table report + Excel export (ClosedXML) |
+| D5 | Material library model | System base library (SystemAdmin-owned) + tenant delta overrides in `MaterialTenantDetail` |
+| D6 | Tenant-created materials | Allowed — tenant-created `Material` rows with `IsSystemMaterial = false` |
+| D7 | SystemAdmin seeding | `DbInitializer` from environment variable for now; setup wizard page in a future phase |
+| D8 | Tenant override scope | All fields including all EAV attributes (`MaterialTenantAttribute` table) |
+| D9 | System update propagation | Non-overridden fields inherit system updates; overridden fields are frozen at tenant value; field-level reset to null restores inheritance |
+| D10 | Tenant pricing history | Full independent temporal chain (`MaterialTenantDetail` with EffectiveDate/ObsoleteDate); as-of date queries support historical reports |
+| D11 | Timezone storage | All `DateTime` values stored in DB as UTC. MySQL `DATETIME` type used (not `TIMESTAMP`). `TimeProvider` injected into all services; current time obtained via `_timeProvider.GetUtcNow().DateTime` — `DateTime.UtcNow` never called directly. EF global value converter enforces `DateTimeKind.Utc` at the DbContext boundary. `FakeTimeProvider` enables deterministic time in tests. |
+| D12 | Timezone display | IANA timezone ID stored on `ApplicationUser` (default `"UTC"`). Browser timezone captured via JS interop on session start. `NodaTime` handles all conversions in Web layer only. BRL/Domain are timezone-unaware. |
+| D13 | Temporal succession pattern | Outgoing record `ObsoleteDate` == incoming record `EffectiveDate` (shared boundary, no gap, no overlap). `RecordSuccessionService` is the only write path for temporal records. Future-dated successions fully supported. |
+| D14 | DST gap handling (spring forward) | `DateTimeInput` component detects via `ZoneLocalMapping.Count == 0`; surfaces disambiguation UI — never silently snaps. Throws `SkippedTimeException` (domain type) for the UI to catch and display. Resolved value emitted as UTC `DateTime`. |
+| D15 | DST overlap handling (fall back) | `DateTimeInput` component detects via `ZoneLocalMapping.Count == 2`; shows both UTC options (daylight / standard) for user to choose explicitly. Throws `AmbiguousTimeException` (domain type). Succession records stored as UTC `DateTime` are immune to DST entirely. |
+| D16 | Primary key strategy | All tables use `int {TableName}Id` (auto-increment PK) for all internal joins. Every entity also carries `Guid {TableName}Guid` (unique index, server-generated on insert) for UI routes and external references. Exception: `ApplicationUser` retains Identity's `int Id` convention and adds `Guid UserGuid`. |
+| D17 | User signup & tenant creation | Self-registration auto-creates a personal `Tenant` and assigns the user as `TenantAdmin` in a single transaction. `TenantId` is null only for `SystemAdmin` — no other null-tenant state exists. A solo user's tenant can grow into a team by inviting others; no data migration needed. `TenantGuid` (not `TenantId`) is stored in JWT claims; `tenant_id` int claim enables zero-DB-hit filter per request. |
+| D18 | Subscription plan model | Two tiers at launch: `Solo` (single user) and `Team` (multi-user, invites, role management). Plans use a dedicated `Plan` / `PlanDetail` / `PlanAttribute` schema — not `CmType`. Adding a new tier or changing pricing is a data change only. `PlanDetail` is temporal (tracks price history). `PlanAttribute` EAV drives the marketing/pricing page with no code changes. `Tenant.PlanId` (FK → `Plan`) replaces the old `CmType`-based `PlanTypeId`. `plan_id` claim written at login for zero-DB-hit gating. `<PlanGate>` Blazor component gates UI. Billing integration deferred — plan flipped by `SystemAdmin` for now. Downgrade blocked if multiple active users exist on a Solo-target tenant. |
+| D22 | Plan schema vs CmType | Plans are not stored as `CmType` dictionary entries. `CmType` is for simple lookups (operation types, line types, record states). Plans have rich structured data — temporal pricing history, display content, EAV feature attributes for a marketing page — which requires a dedicated schema. Code-level feature gating (`PlanFeature` enum, `IPlanGateService`) remains separate from the marketing display data (`PlanAttribute`). |
+| D19 | POCO isolation layer | `CabinetMaker.Domain.Shared` is a dependency-free project holding all POCOs, repository interfaces, service interfaces, `Result<T>`, shared enums, and POCO→POCO Mapperly mappers. `CabinetMaker.Domain` (EF entities) is referenced only by `DAL` — never by `BRL` or `Web`. DAL repository methods map EF entities to POCOs before returning, using Mapperly source-generated mappers in the DAL project. This prevents EF type leakage into business and UI layers and makes BRL/Web fully testable without an EF dependency. |
+| D20 | POCO key policy | POCOs in `Domain.Shared` carry `{TableName}Guid` only — the `int {TableName}Id` is an internal DB implementation detail that is stripped by the DAL mapper and never passed above the DAL boundary. All cross-POCO relationships in BRL and Web reference records by `Guid`. This keeps upper-layer code agnostic of the database's integer key space and prevents accidental direct DB joins from outside DAL. |
+| D21 | API / multi-client strategy | Web (Blazor Server) calls BRL directly — in-process, no HTTP overhead. No API layer is built now. When a MAUI client is added in a future phase, that is when a GraphQL API (`CabinetMaker.API` using Hot Chocolate) will be introduced. Both the Web and API projects will reference BRL directly; MAUI will call the GraphQL endpoint over HTTP. The existing `Domain.Shared` POCO design already positions the system for this — POCOs map cleanly to GraphQL types and `Result<T>` maps to union types. No refactoring of BRL or DAL will be required when the API is added. |
+| D23 | Repository access pattern | Unit of Work pattern via `IUnitOfWork` (scoped). `RepositoryTypeMap` (singleton) scans the DAL assembly once at startup and builds a `Dictionary<Type, Type>` mapping entity types to their concrete repository classes. `UnitOfWork.GetRepository<TEntity>()` checks the map first (uses `ActivatorUtilities.CreateInstance` — no DI registration needed for the repo itself), falls back to `new BaseRepository<TEntity>()` for entities without a custom class, and caches the instance per entity type for the lifetime of the request/circuit. No individual `IRepository<T>` DI registrations are needed. Adding a custom repository class for an entity is sufficient — the type map picks it up automatically on next app start. |
+
+---
+
+## 13. Open Questions
+
+These must be answered before the relevant phase begins.
+
+**Q1 — Cabinet Domain Vocabulary** *(blocks Phase 2)*  
+What are the named cabinet/assembly types and sub-component names you work with? Face-frame vs. frameless construction? Overlay vs. inset doors? The domain model (`CmType` dictionary seeds) should use your shop's vocabulary from day one.
+
+**Q2 — Target Measurement Units at Launch** *(answered)*  
+Both imperial and metric at launch. Seeded: Inches (system base), Feet, Millimeters, Centimeters, Meters. Fractional inch display is a hard requirement — `FractionHelper.ToFractionalInches()` implemented with selectable precision (1/8, 1/16, 1/32, 1/64). Decimal display retained alongside fractions.
+
+**Q3 — MaterialTenantDetail: Scope of Overrides** *(answered — see D8)*  
+All fields including all EAV attributes. `MaterialTenantAttribute` table added.
+
+**Q4 — MaterialTenantDetail: System Update Propagation** *(answered — see D9)*  
+Non-overridden fields inherit system updates. Overridden fields are frozen. Field reset to null restores inheritance.
+
+**Q5 — MaterialTenantDetail: Tenant Pricing Temporal Records** *(answered — see D10)*  
+Full independent temporal pricing chain per tenant. As-of date queries support historical reports.
+
+**Q6 — Cut List: Grouping & Sorting** *(blocks Phase 4)*  
+On the cut list report, what is the preferred default grouping? Options: flat (all parts in sequence), grouped by material, grouped by assembly, or grouped by operation type. Should the user be able to switch groupings on screen?
+
+**Q7 — Prior Project Salvage** *(informational)*  
+From the previous abandoned project — are there specific domain terms, business rules, or data worth carrying forward into the `CmType` dictionary seeds?
+
+**Q8 — Testing Appetite** *(blocks Phase 6 scope)*  
+Unit tests for the measurement/conversion engine and `MaterialResolutionService` (essential), full EF integration tests against a real MySQL container, bUnit component tests, or all three?

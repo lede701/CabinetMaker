@@ -1,0 +1,183 @@
+using CabinetMaker.BRL.Extensions;
+using CabinetMaker.DAL.Context;
+using CabinetMaker.Domain.Entities;
+using CabinetMaker.Domain.Enums;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+
+namespace CabinetMaker.BRL.Services;
+
+public class DbSeeder
+{
+    private readonly UserManager<User> _userManager;
+    private readonly RoleManager<IdentityRole<int>> _roleManager;
+    private readonly BrlServiceConfiguration _config;
+    private readonly CmContext _context;
+
+    public DbSeeder(UserManager<User> userManager, RoleManager<IdentityRole<int>> roleManager,
+        BrlServiceConfiguration config, CmContext context)
+    {
+        _userManager = userManager;
+        _roleManager = roleManager;
+        _config = config;
+        _context = context;
+    }
+
+    public async Task SeedAsync()
+    {
+        await SeedRolesAsync();
+        await SeedAdminAsync();
+        await SeedTypeClassesAsync();
+        await SeedTypesAsync();
+        await SeedUnitsAsync();
+        await SeedMaterialCategoriesAsync();
+    }
+
+    private async Task SeedRolesAsync()
+    {
+        string[] roles = ["Admin", "TenantAdmin", "User"];
+        foreach (var role in roles)
+        {
+            if (!await _roleManager.RoleExistsAsync(role))
+                await _roleManager.CreateAsync(new IdentityRole<int>(role));
+        }
+    }
+
+    private async Task SeedAdminAsync()
+    {
+        if (string.IsNullOrEmpty(_config.AdminEmail)) return;
+        if (await _userManager.FindByEmailAsync(_config.AdminEmail) is not null) return;
+
+        var admin = new User
+        {
+            UserGuid = Guid.NewGuid(),
+            UserName = _config.AdminEmail,
+            Email = _config.AdminEmail,
+            DisplayName = _config.AdminDisplayName,
+            EmailConfirmed = true
+        };
+
+        var result = await _userManager.CreateAsync(admin, _config.AdminPassword);
+        if (result.Succeeded)
+            await _userManager.AddToRoleAsync(admin, "Admin");
+    }
+
+    private async Task SeedTypeClassesAsync()
+    {
+        if (!await _context.TypeClasses.AnyAsync(tc => tc.CmTypeClassID == (int)TypeClassId.RecordState))
+        {
+            _context.TypeClasses.Add(new CmTypeClass
+            {
+                Name = "RecordState",
+                Description = "Record lifecycle states",
+                RecordStateId = (int)RecordStateTypeId.Active
+            });
+            await _context.SaveChangesAsync();
+        }
+
+        if (!await _context.TypeClasses.AnyAsync(tc => tc.CmTypeClassID == (int)TypeClassId.UnitType))
+        {
+            _context.TypeClasses.Add(new CmTypeClass
+            {
+                Name = "UnitType",
+                Description = "Categories of units of measurement",
+                RecordStateId = (int)RecordStateTypeId.Active
+            });
+            await _context.SaveChangesAsync();
+        }
+
+        if (!await _context.TypeClasses.AnyAsync(tc => tc.CmTypeClassID == (int)TypeClassId.MaterialCategory))
+        {
+            _context.TypeClasses.Add(new CmTypeClass
+            {
+                Name = "MaterialCategory",
+                Description = "Top-level categories for materials in the library",
+                RecordStateId = (int)RecordStateTypeId.Active
+            });
+            await _context.SaveChangesAsync();
+        }
+    }
+
+    private async Task SeedTypesAsync()
+    {
+        var seeds = new[]
+        {
+            new CmType { TypeID = (int)RecordStateTypeId.Active,          TypeClassID = (int)TypeClassId.RecordState,      Name = "Active",      Ordering = 1, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)RecordStateTypeId.Deleted,         TypeClassID = (int)TypeClassId.RecordState,      Name = "Deleted",     Ordering = 2, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)RecordStateTypeId.Archived,        TypeClassID = (int)TypeClassId.RecordState,      Name = "Archived",    Ordering = 3, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)UnitTypeId.Length,                 TypeClassID = (int)TypeClassId.UnitType,         Name = "Length",      Ordering = 1, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)MaterialCategoryTypeId.SheetGood,  TypeClassID = (int)TypeClassId.MaterialCategory, Name = "Sheet Good",  Ordering = 1, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)MaterialCategoryTypeId.SolidWood,  TypeClassID = (int)TypeClassId.MaterialCategory, Name = "Solid Wood",  Ordering = 2, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)MaterialCategoryTypeId.Hardware,   TypeClassID = (int)TypeClassId.MaterialCategory, Name = "Hardware",    Ordering = 3, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmType { TypeID = (int)MaterialCategoryTypeId.Finish,     TypeClassID = (int)TypeClassId.MaterialCategory, Name = "Finish",      Ordering = 4, RecordStateId = (int)RecordStateTypeId.Active },
+        };
+
+        foreach (var seed in seeds)
+        {
+            if (!await _context.Types.AnyAsync(t => t.TypeID == seed.TypeID))
+                _context.Types.Add(seed);
+        }
+
+        await _context.SaveChangesAsync();
+    }
+
+    private async Task SeedUnitsAsync()
+    {
+        if (await _context.Units.AnyAsync()) return;
+
+        var units = new[]
+        {
+            new CmUnit { Name = "Inches",      Abbreviation = "in", IsSystemBase = true,  BaseMultiplier = 1.000000m,  DisplayPrecision = 4, UnitTypeID = (int)UnitTypeId.Length, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmUnit { Name = "Feet",        Abbreviation = "ft", IsSystemBase = false, BaseMultiplier = 12.000000m, DisplayPrecision = 4, UnitTypeID = (int)UnitTypeId.Length, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmUnit { Name = "Millimeters", Abbreviation = "mm", IsSystemBase = false, BaseMultiplier = 0.039370m,  DisplayPrecision = 2, UnitTypeID = (int)UnitTypeId.Length, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmUnit { Name = "Centimeters", Abbreviation = "cm", IsSystemBase = false, BaseMultiplier = 0.393701m,  DisplayPrecision = 3, UnitTypeID = (int)UnitTypeId.Length, RecordStateId = (int)RecordStateTypeId.Active },
+            new CmUnit { Name = "Meters",      Abbreviation = "m",  IsSystemBase = false, BaseMultiplier = 39.370079m, DisplayPrecision = 4, UnitTypeID = (int)UnitTypeId.Length, RecordStateId = (int)RecordStateTypeId.Active },
+        };
+
+        _context.Units.AddRange(units);
+        await _context.SaveChangesAsync();
+    }
+
+    private async Task SeedMaterialCategoriesAsync()
+    {
+        if (await _context.Materials.AnyAsync()) return;
+
+        var now = DateTime.UtcNow;
+        var materials = new[]
+        {
+            ("3/4\" Maple Plywood",  "Cabinet-grade maple veneer plywood",  MaterialCategoryTypeId.SheetGood,  false),
+            ("3/4\" Birch Plywood",  "Baltic birch plywood, 13-ply",        MaterialCategoryTypeId.SheetGood,  false),
+            ("3/4\" MDF",            "Medium-density fibreboard",           MaterialCategoryTypeId.SheetGood,  false),
+            ("4/4 Hard Maple",       "Hard maple dimensional lumber",       MaterialCategoryTypeId.SolidWood,  true),
+            ("4/4 Red Oak",          "Red oak dimensional lumber",          MaterialCategoryTypeId.SolidWood,  true),
+        };
+
+        foreach (var (name, desc, category, grain) in materials)
+        {
+            var material = new CmMaterial
+            {
+                CmMaterialGuid = Guid.NewGuid(),
+                IsSystemMaterial = true,
+                MaterialCategoryTypeId = (int)category,
+                HasGrainDirection = grain,
+                RecordStateId = (int)RecordStateTypeId.Active
+            };
+            _context.Materials.Add(material);
+            await _context.SaveChangesAsync();
+
+            _context.MaterialDetails.Add(new CmMaterialDetail
+            {
+                CmMaterialDetailGuid = Guid.NewGuid(),
+                CmMaterialId = material.CmMaterialId,
+                Name = name,
+                Description = desc,
+                UnitCost = 0m,
+                WasteFactorPercentage = 0.10m,
+                EffectiveDate = now,
+                RecordStateId = (int)RecordStateTypeId.Active
+            });
+        }
+
+        await _context.SaveChangesAsync();
+    }
+}

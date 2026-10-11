@@ -1,0 +1,24 @@
+using CabinetMaker.BRL.Services;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace CabinetMaker.BRL.Extensions;
+
+public static class BrlServiceExtensions
+{
+    public static IServiceCollection AddBusinessLayer(this IServiceCollection services)
+        => AddBusinessLayer(services, new BrlServiceConfiguration());
+
+    public static IServiceCollection AddBusinessLayer(this IServiceCollection services, Action<BrlServiceConfiguration> configure)
+    {
+        var config = new BrlServiceConfiguration();
+        configure(config);
+        return AddBusinessLayer(services, config);
+    }
+
+    public static IServiceCollection AddBusinessLayer(this IServiceCollection services, BrlServiceConfiguration config)
+    {
+        services.AddSingleton(config);
+        services.AddScoped<DbSeeder>();
+        return services;
+    }
+}

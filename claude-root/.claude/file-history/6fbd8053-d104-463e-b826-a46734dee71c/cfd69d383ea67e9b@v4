@@ -1,0 +1,450 @@
+# CabinetMaker — Project Plan
+
+**Date:** 2026-10-10
+
+**Stack:** C# · Blazor Server · .NET 10 · Entity Framework Core 10 · MySQL (primary) / SQL Server (supported) · Bootstrap · Docker (Linux)
+
+## 1. Project Purpose
+
+CabinetMaker is a professional-grade, multi-tenant design tool for cabinet makers and furniture builders. Its core job is to capture, organize, and calculate measurements for cabinet projects — from a single unit to a complete kitchen or custom furniture piece — and produce accurate cut lists, material estimates, and project summaries.
+
+Two foundational primitives underpin everything else:
+
+1. A **database-driven, unit-agnostic measurement system** — every dimension, mass, or volume flows through a unified conversion engine, preventing metric/imperial collisions and supporting tape-measure-accurate fractional snapping.
+
+2. A **tenant isolation model** — every piece of data is scoped to the tenant it belongs to, enforced at the database layer, invisible to application code.
+
+## 2. Infrastructure & Deployment
+
+### 2.1 Docker / Linux Hosting
+
+The application is packaged as a Docker container and can run on any Linux Docker host (self-hosted, VPS, cloud VM). No Azure-specific or Windows-specific dependencies are permitted.
+
+```
+docker-compose.yml (development)
+  web       — CabinetMaker.Web container (port 8080)
+  db        — MySQL 8.x container (port 3306)
+
+Dockerfile  (multi-stage)
+  Stage 1 (build): mcr.microsoft.com/dotnet/sdk:10.0
+  Stage 2 (runtime): mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim
+```
+
+All configuration (connection strings, admin seed credentials) is supplied via environment variables. No secrets are baked into the image.
+
+### 2.2 Database Provider Abstraction
+
+**Primary: MySQL 8.x** (Pomelo EF Core provider). **Also supported: SQL Server** (Microsoft EF Core provider). The active provider is selected at startup from a single config value:
+
+```
+# appsettings.json / environment variable
+"DatabaseProvider": "MySql"   // or "SqlServer"
+```
+
+A `DatabaseProviderFactory` extension method in DAL registers the correct `DbContextOptions` based on this value:
+
+```csharp
+// DAL/Extensions/DatabaseProviderExtensions.cs
+services.AddDbContext<CabinetMakerDbContext>(options =>
+{
+    if (provider == "MySql")
+        options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString));
+    else
+        options.UseSqlServer(connectionString);
+});
+```
+
+**Provider differences to account for:**
+
+| Feature | MySQL (Pomelo) | SQL Server |
+|---|---|---|
+| JSON columns | `JSON` type, `.HasColumnType("json")` | `nvarchar(max)` or `json` (SQL Server 2022+) |
+| GUIDs | `char(36)` or `binary(16)` | `uniqueidentifier` |
+| Auto-increment | `AUTO_INCREMENT` | `IDENTITY` |
+| Migrations | Separate migration sets per provider, or provider-aware migrations |
+
+Migrations are kept in separate folders: `DAL/Migrations/MySql/` and `DAL/Migrations/SqlServer/`. A CLI helper script selects the correct migration context at design time.
+
+## 3. Solution Structure (Projects)
+
+```
+CabinetMaker.slnx
+└── src/
+    ├── CabinetMaker.Domain/      # Entities, interfaces, dictionary models, JSON models
+    ├── CabinetMaker.DAL/         # EF Core DbContext, migrations, repositories
+    ├── CabinetMaker.BRL/         # Business rules, conversion services, validation
+    └── CabinetMaker.Web/         # Blazor Server UI, ViewModels, formatters (MVVM)
+
+```
+
+### Project Dependency Flow
+
+`Web → BRL → DAL → Domain`
+
+* **Domain** has zero dependencies on other projects (pure C#).
+
+* **DAL** references Domain for entity definitions.
+
+* **BRL** references DAL (via interfaces defined in Domain).
+
+* **Web** references BRL only; never touches DAL directly.
+
+## 3. Multi-Tenancy & Identity Architecture
+
+### 3.1 Isolation Model — Row-Level with Global Query Filters
+
+**Choice: single database, shared schema, `TenantId` discriminator column on every tenant-scoped table.**
+EF Core Global Query Filters enforce isolation at the ORM layer. No query in the application ever accidentally crosses tenant boundaries.
+
+### 3.2 Tenant-Scoped Entities
+
+Every entity that belongs to a tenant implements the marker interface:
+
+```
+public interface ITenantScoped
+{
+    Guid TenantId { get; set; }
+}
+
+```
+
+Entities that are **not** tenant-scoped: `Tenant`, `ApplicationUser`, and System Dictionaries (`SysTypeClass`, `CmType`, `CmUnit`).
+
+### 3.3 Role Hierarchy
+
+| Role | Scope | Capabilities | 
+| ----- | ----- | ----- | 
+| `SystemAdmin` | Platform-wide | Manage tenants, view all data, bypass filters, seed `SysTypeClass` and `CmType` tables. | 
+| `TenantAdmin` | Within one tenant | Manage tenant users, configure material library and temporal pricing. | 
+| `TenantUser` | Within one tenant | Create/edit jobs, assemblies, and generate cut lists. | 
+
+## 4. Dictionary & Measurement System
+
+The system must be highly flexible, supporting dynamic conversions between metric and imperial systems based on user preference, while storing a canonical source of truth.
+
+### 4.1 System Dictionary Pattern
+
+The system uses a parent-child dictionary pattern for all enumerations, states, and classifications. The `BaseTypeBaseId` acts as the numeric floor. All domain entities link to specific records in `CmType` using a `{Description}TypeId` foreign key convention.
+
+```
+public class SysTypeClass : BaseEntity
+{
+    public int Id { get; set; } 
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int BaseTypeBaseId { get; set; } // e.g., 1000, 2000
+    
+    public virtual ICollection<CmType> Types { get; set; } = new List<CmType>();
+}
+
+public class CmType : BaseEntity
+{
+    public int Id { get; set; } // e.g., 1001, 1002
+    public int TypeClassId { get; set; }
+    public virtual SysTypeClass TypeClass { get; set; } = null!;
+    
+    public string Name { get; set; } = string.Empty;
+}
+
+```
+
+### 4.2 Universal Measurement Engine
+
+All physical dimensions, mass, and volume flow through a dynamic conversion engine. `CmUnit` defines the conversion logic, and `CmMeasurement` acts as the universal storage table, compressing repeated measurements.
+
+```
+public class CmUnit : BaseEntity
+{
+    public string Name { get; set; } = string.Empty;
+    public string Abbreviation { get; set; } = string.Empty;
+    public int UnitTypeId { get; set; } // Links to CmType (Length, Mass, etc.)
+    public virtual CmType UnitType { get; set; } = null!;
+    public bool IsSystemBase { get; set; }
+    public decimal BaseMultiplier { get; set; }
+    public int DisplayPrecision { get; set; }
+}
+
+public class CmMeasurement : BaseEntity
+{
+    public decimal RawValue { get; set; }
+    public int UnitId { get; set; }
+    public virtual CmUnit Unit { get; set; } = null!;
+}
+
+```
+
+## 5. Core Domain Schema
+
+### 5.1 Material Library — System Base + Tenant Override Pattern
+
+The material library uses a **two-tier ownership model**:
+
+- **Tier 1 — System Library**: `Material` records managed exclusively by `SystemAdmin`. These are *not* tenant-scoped. They represent the canonical, shared catalog all tenants start from. SystemAdmin seeds and maintains this library.
+- **Tier 2 — Tenant Overrides**: When a tenant customizes a system material, a `MaterialTenantDetail` record is created. This record stores only the tenant's delta — the fields they changed. The BRL `MaterialResolutionService` merges system + tenant records into a single effective `EffectiveMaterial` view at query time.
+- **Tier 2 — Tenant-Created Materials**: Tenants may also create *new* materials with no system counterpart. These are fully tenant-scoped `Material` records with `IsSystemMaterial = false`.
+
+This means a tenant's effective material library = System materials (possibly with overrides) + Tenant-created materials.
+
+**Resolution rule** (applied in `MaterialResolutionService`):
+
+> For every field on `MaterialTenantDetail`: if the tenant override value is non-null, use it; otherwise fall back to the system `Material` value.
+
+```
+Material : BaseEntity                          // NOT ITenantScoped
+{
+    bool IsSystemMaterial                       // true = SystemAdmin-owned
+    Guid? TenantId                              // null when IsSystemMaterial = true
+    int MaterialCategoryTypeId                  // → CmType
+    bool HasGrainDirection
+    ICollection<MaterialDetail> Details
+    ICollection<MaterialAttribute> Attributes
+    ICollection<MaterialTenantDetail> TenantOverrides
+}
+
+MaterialDetail : BaseEntity                    // temporal pricing — system-level
+{
+    int MaterialId
+    DateTime EffectiveDate
+    DateTime? ObsoleteDate
+    string Name
+    decimal UnitCost
+    decimal WasteFactorPercentage
+}
+
+MaterialTenantDetail : BaseEntity, ITenantScoped   // tenant override (delta)
+{
+    Guid TenantId
+    int MaterialId                              // → Material (system record)
+    DateTime EffectiveDate
+    DateTime? ObsoleteDate
+    bool IsHidden                               // tenant can suppress a system material
+    string? OverrideName                        // null = use system value
+    decimal? OverrideUnitCost                   // null = use system value
+    decimal? OverrideWasteFactorPercentage      // null = use system value
+    // Attribute-level overrides handled via MaterialTenantAttribute (see open questions)
+}
+
+MaterialAttribute : BaseEntity                  // EAV — system-level attributes
+{
+    int MaterialId
+    int AttributeTypeId                         // → CmType (Width, Color, Thickness, etc.)
+    int? MeasurementId                          // → CmMeasurement
+    string? StringValue
+}
+```
+
+**Key behaviors:**
+- When a tenant first views the material library, they see the full system library (minus any `IsHidden = true` records they've set).
+- The first time a tenant edits a system material, a `MaterialTenantDetail` row is created for that tenant. The system material is never modified.
+- If SystemAdmin later updates the system material, the delta fields the tenant *has not* overridden automatically reflect the update. Fields the tenant *has* overridden remain at the tenant's value.
+- A tenant can "reset to system default" by deleting their `MaterialTenantDetail` record.
+
+**Open questions about this feature are in Section 11.**
+
+### 5.2 Job & Assembly Hierarchy
+
+The physical workflow of the shop, moving from the client project container down to the individual cuts.
+
+```
+public class Job : BaseEntity, ITenantScoped
+{
+    public Guid TenantId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public virtual ICollection<Assembly> Assemblies { get; set; } = new List<Assembly>();
+}
+
+public class Assembly : BaseEntity, ITenantScoped
+{
+    public Guid TenantId { get; set; }
+    public int JobId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public int OverallHeightId { get; set; }
+    public int OverallWidthId { get; set; }
+    public int OverallDepthId { get; set; } // Links to CmMeasurement
+    public virtual ICollection<Part> Parts { get; set; } = new List<Part>();
+}
+
+public class Part : BaseEntity, ITenantScoped
+{
+    public Guid TenantId { get; set; }
+    public int AssemblyId { get; set; }
+    public string Name { get; set; } = string.Empty; 
+    public int Quantity { get; set; } = 1;
+    public int CutLengthId { get; set; }
+    public int CutWidthId { get; set; } // Links to CmMeasurement
+    public int MaterialId { get; set; }
+    public virtual Material Material { get; set; } = null!;
+    public virtual ICollection<PartOperation> Operations { get; set; } = new List<PartOperation>();
+}
+
+```
+
+### 5.3 Machining Operations (JSONb)
+
+Joinery and tool paths are decoupled. Dimensions are serialized as strongly-typed JSON.
+
+```
+public class PartOperation : BaseEntity
+{
+    public int PartId { get; set; }
+    public virtual Part Part { get; set; } = null!;
+    public int OperationTypeId { get; set; } // Links to CmType (Dado, Dowel, etc.)
+    public virtual CmType OperationType { get; set; } = null!;
+    public PartFace Face { get; set; }
+    public string OperationParametersJson { get; set; } = string.Empty; // Mapped as jsonb
+}
+
+```
+
+## 6. Data Access Layer (DAL)
+
+`CabinetMakerDbContext` configuration:
+
+1. **Soft Deletes:** `modelBuilder.Entity<T>().HasQueryFilter(e => e.RecordStateId == 1000);`
+
+2. **Tenant Isolation:** `modelBuilder.Entity<ITenantScoped>().HasQueryFilter(e => _tenantContext.IsSystemAdmin || e.TenantId == _tenantContext.TenantId);`
+
+3. **JSON Mapping:** `PartOperation.OperationParametersJson` maps to MySQL `JSON` column (Pomelo) or `nvarchar(max)` with JSON constraint on SQL Server. Provider-specific column type is set in the `DatabaseProviderExtensions` configuration.
+
+4. **Cascade Protection:** `DeleteBehavior.Restrict` on `MaterialId` and `CmMeasurement` references to prevent cascade loops.
+
+5. **Auto-Stamping:** Overrides `SaveChangesAsync` to ensure `TenantId` is stamped on all inserted `ITenantScoped` entities.
+
+## 7. Business Rules Layer (BRL)
+
+* **`MeasurementConversionService`**: Converts values dynamically based on `BaseMultiplier` math.
+
+* **`MaterialResolutionService`**: Merges system `Material` + tenant `MaterialTenantDetail` into an `EffectiveMaterial` projection. Handles temporal `MaterialDetail` queries, returning active pricing based on current/historical dates. Called by all services that need material data — no consumer ever queries `Material` directly without going through resolution.
+
+* **`CutListService`**: Generates cut lists from Assemblies, parsing `PartOperation` JSON to factor in joinery deductions (e.g., dado depths).
+
+* **Validation**: Uses FluentValidation for all entities/commands.
+
+* **Result Pattern**: Services return `Result<T>` instead of throwing business logic exceptions.
+
+## 8. Web / UI Layer
+
+### 8.1 Blazor & MVVM
+
+* **Render Mode:** Interactive Server.
+
+* **MVVM:** Uses `CommunityToolkit.Mvvm` (`ObservableObject`, `[RelayCommand]`).
+
+* **Component Base:** `ViewModelComponentBase<TViewModel>` bridges `PropertyChanged` to `StateHasChanged()`.
+
+* **UI Framework:** Bootstrap 5.x via LibMan.
+
+### 8.2 Fractional Snapping
+
+The UI layer enforces fractional snapping to ensure woodworkers see usable measurements.
+`MeasurementFormatter.ToTapeMeasureFraction(decimal rawInches, int precision = 16)` converts high-precision DB decimals into standard tape-measure fractions (e.g., `1.1811` -> `1 3/16"`).
+
+## 9. Implementation Phases
+
+### Phase 1 — Foundation (Tenancy, Identity, Dictionary Schema, Infrastructure)
+
+* \[ \] `Dockerfile` (multi-stage, .NET 10 SDK → ASP.NET runtime) + `docker-compose.yml` (web + MySQL).
+
+* \[ \] `DatabaseProviderExtensions` — MySQL (Pomelo) and SQL Server provider switching via config.
+
+* \[ \] Base entities, `ITenantScoped` interface, `RecordStateId`.
+
+* \[ \] ASP.NET Core Identity & Role setup (`SystemAdmin`, `TenantAdmin`, `TenantUser`).
+
+* \[ \] `DbInitializer` — seeds `SystemAdmin` account from environment variable; seeds system dictionary data.
+
+* \[ \] Core dictionary schema (`SysTypeClass`, `CmType`).
+
+* \[ \] Measurement schema (`CmUnit`, `CmMeasurement`) & `MeasurementConversionService`.
+
+* \[ \] DbContext Global Query Filters (Tenant + Soft Delete).
+
+### Phase 2 — Core Domain (Material EAV & Job Hierarchy)
+
+* \[ \] Material engine (`Material`, `MaterialDetail`, `MaterialAttribute`).
+
+* \[ \] Hierarchy (`Job`, `Assembly`, `Part`, `PartOperation`).
+
+* \[ \] EF Core JSON mapping for `PartOperation` parameters.
+
+* \[ \] `MaterialService` and temporal querying logic.
+
+### Phase 3 — UI Shell + MVVM Wiring
+
+* \[ \] `CommunityToolkit.Mvvm` integration.
+
+* \[ \] Layout, NavMenu, and Authentication state UI.
+
+* \[ \] `MeasurementInput` component with `MeasurementFormatter` (Fractional Snapping).
+
+### Phase 4 — Feature Pages
+
+* \[ \] Tenant Management (SystemAdmin only).
+
+* \[ \] Material Library Manager (handling EAV attributes and temporal details).
+
+* \[ \] Job & Assembly Editor.
+
+* \[ \] Cut List Generator — on-screen paginated table report.
+
+* \[ \] Cut List Excel Export (`ClosedXML` — one sheet per assembly, totals row, formatted columns).
+
+* \[ \] Material Estimate Report — on-screen + Excel export.
+
+## 10. NuGet Package Plan
+
+| Project | Package | Purpose |
+|---|---|---|
+| Domain | *(none)* | Pure C# — no external dependencies |
+| DAL | `Pomelo.EntityFrameworkCore.MySql` | MySQL provider (primary) |
+| DAL | `Microsoft.EntityFrameworkCore.SqlServer` | SQL Server provider (secondary) |
+| DAL | `Microsoft.AspNetCore.Identity.EntityFrameworkCore` | Identity tables |
+| BRL | `FluentValidation` | Entity/command validation |
+| BRL | `FluentValidation.DependencyInjectionExtensions` | DI auto-registration |
+| Web | `CommunityToolkit.Mvvm` | MVVM source generators (`[ObservableProperty]`, `[RelayCommand]`) |
+| Web | `Microsoft.AspNetCore.Components.Authorization` | `AuthorizeView`, policy enforcement in Blazor |
+| Web | `ClosedXML` | Excel export for cut lists and material estimates |
+
+---
+
+## 11. Decided — Architecture Decisions Log
+
+| # | Decision | Choice |
+|---|---|---|
+| D1 | Deployment target | Docker container, Linux host — any Docker-compatible platform |
+| D2 | Primary database | MySQL 8.x (Pomelo EF provider); SQL Server also supported via provider switch |
+| D3 | Local dev database | MySQL in docker-compose (matches production, no LocalDB dependency) |
+| D4 | Cut list output | On-screen paginated table report + Excel export (ClosedXML) |
+| D5 | Material library model | System base library (SystemAdmin-owned) + tenant delta overrides in `MaterialTenantDetail` |
+| D6 | Tenant-created materials | Allowed — tenants can create materials with no system counterpart |
+| D7 | SystemAdmin seeding | `DbInitializer` from environment variable for now; setup wizard page in a future phase |
+
+---
+
+## 12. Open Questions
+
+These must be answered before the relevant phase begins.
+
+**Q1 — Cabinet Domain Vocabulary** *(blocks Phase 2)*  
+What are the named cabinet/assembly types and sub-component names you work with? Face-frame vs. frameless construction? Overlay vs. inset doors? The domain model (`CmType` dictionary seeds) should use your shop's vocabulary from day one.
+
+**Q2 — Target Measurement Units at Launch** *(blocks Phase 1 seed data)*  
+Imperial only (inches/feet), Metric only (mm/cm/m), or both? Are fractional inches (1/8", 1/16") a display requirement or is decimal inches acceptable? This determines the initial `CmUnit` seed records.
+
+**Q3 — MaterialTenantDetail: Scope of Overrides** *(blocks Phase 2 material engine)*  
+When a tenant customizes a system material, which fields are overridable? Current plan: `Name`, `UnitCost`, `WasteFactorPercentage`, `IsHidden`. Should tenants also be able to override **EAV attributes** (e.g., override a thickness value)? If yes, we need a `MaterialTenantAttribute` table in addition to `MaterialTenantDetail`.
+
+**Q4 — MaterialTenantDetail: System Update Propagation** *(blocks Phase 2 material engine)*  
+If `SystemAdmin` corrects a system material after a tenant has already created a `MaterialTenantDetail` row, should the system update flow through to that tenant for fields they haven't explicitly overridden? The current design says **yes** (delta-only approach — null = inherit from system). Confirm this is the desired behavior, or flag if "freeze on first customization" is preferable.
+
+**Q5 — MaterialTenantDetail: Tenant Pricing Temporal Records** *(blocks Phase 2 material engine)*  
+System materials have temporal `MaterialDetail` pricing rows (effective/obsolete dates). Should `MaterialTenantDetail` also support its own temporal pricing chain — so a tenant can have their own price history independent of the system's? Or does the tenant override only apply to the *current active* system price?
+
+**Q6 — Cut List: Grouping & Sorting** *(blocks Phase 4)*  
+On the cut list report, what is the preferred default grouping? Options: flat (all parts in sequence), grouped by material, grouped by assembly, or grouped by operation type. Should the user be able to switch groupings on screen?
+
+**Q7 — Prior Project Salvage** *(informational)*  
+From the previous abandoned project — are there specific domain terms, business rules, or data worth carrying forward into the `CmType` dictionary seeds?
+
+**Q8 — Testing Appetite** *(blocks Phase 6 scope)*  
+Unit tests for the measurement/conversion engine and `MaterialResolutionService` (essential), full EF integration tests against a real MySQL container, bUnit component tests, or all three?

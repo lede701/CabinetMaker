@@ -1,0 +1,11 @@
+@if (showReminder)
+{
+    <div class="alert alert-warning alert-dismissible d-flex align-items-center mb-0" role="alert">
+        <i class="bi bi-shield-exclamation me-2"></i>
+        <span>
+            Your account is not protected by two-factor authentication.
+            <a href="/account/manage/enable-authenticator" class="alert-link ms-1">Enable 2FA now</a> to secure your account.
+        </span>
+        <button type="button" class="btn-close ms-auto" @onclick="Dismiss" aria-label="Dismiss"></button>
+    </div>
+}

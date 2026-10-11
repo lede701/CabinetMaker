@@ -1,0 +1,13 @@
+﻿using CabinetMaker.Domain.Interfaces.Repositories;
+using CabinetMaker.Domain.Entities;
+using Microsoft.Extensions.Logging;
+
+namespace CabinetMaker.DAL.Repositories;
+
+public class UnitRepository : BaseRepository<CmUnit>
+{
+    public UnitRepository(ILogger<UnitRepository> logger, TimeProvider time) : base(logger, time)
+    {
+
+    }
+}

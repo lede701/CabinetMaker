@@ -1,0 +1,9 @@
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace CabinetMaker.Domain.Entities;
+
+public class CmMaterial : CmEntity
+{
+    [Key]
+    public int CmMaterialId { get; set; }
+}

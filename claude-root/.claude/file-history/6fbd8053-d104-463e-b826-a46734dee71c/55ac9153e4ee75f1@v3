@@ -1,0 +1,23 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
+WORKDIR /src
+
+# Copy project files first — layer is cached as long as .csproj files don't change
+COPY ["src/CabinetMaker.Web/CabinetMaker.Web.csproj",                   "src/CabinetMaker.Web/"]
+COPY ["src/CabinetMaker.BRL/CabinetMaker.BRL.csproj",                   "src/CabinetMaker.BRL/"]
+COPY ["src/CabinetMaker.DAL/CabinetMaker.DAL.csproj",                   "src/CabinetMaker.DAL/"]
+COPY ["src/CabinetMaker.Domain/CabinetMaker.Domain.csproj",             "src/CabinetMaker.Domain/"]
+COPY ["src/CabinetMaker.Domain.Shared/CabinetMaker.Domain.Shared.csproj", "src/CabinetMaker.Domain.Shared/"]
+RUN dotnet restore "src/CabinetMaker.Web/CabinetMaker.Web.csproj"
+
+# Copy source and publish
+COPY . .
+RUN dotnet publish "src/CabinetMaker.Web/CabinetMaker.Web.csproj" \
+    --configuration Release \
+    --output /app/publish \
+    --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview AS runtime
+WORKDIR /app
+EXPOSE 8080
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "CabinetMaker.Web.dll"]

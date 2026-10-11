@@ -1,0 +1,54 @@
+using CabinetMaker.BRL.Extensions;
+using CabinetMaker.Domain.Entities;
+using Microsoft.AspNetCore.Identity;
+
+namespace CabinetMaker.BRL.Services;
+
+public class DbSeeder
+{
+    private readonly UserManager<User> _userManager;
+    private readonly RoleManager<IdentityRole<int>> _roleManager;
+    private readonly BrlServiceConfiguration _config;
+
+    public DbSeeder(UserManager<User> userManager, RoleManager<IdentityRole<int>> roleManager, BrlServiceConfiguration config)
+    {
+        _userManager = userManager;
+        _roleManager = roleManager;
+        _config = config;
+    }
+
+    public async Task SeedAsync()
+    {
+        await SeedRolesAsync();
+        await SeedAdminAsync();
+    }
+
+    private async Task SeedRolesAsync()
+    {
+        string[] roles = ["Admin", "TenantAdmin", "User"];
+        foreach (var role in roles)
+        {
+            if (!await _roleManager.RoleExistsAsync(role))
+                await _roleManager.CreateAsync(new IdentityRole<int>(role));
+        }
+    }
+
+    private async Task SeedAdminAsync()
+    {
+        if (string.IsNullOrEmpty(_config.AdminEmail)) return;
+        if (await _userManager.FindByEmailAsync(_config.AdminEmail) is not null) return;
+
+        var admin = new User
+        {
+            UserGuid = Guid.NewGuid(),
+            UserName = _config.AdminEmail,
+            Email = _config.AdminEmail,
+            DisplayName = _config.AdminDisplayName,
+            EmailConfirmed = true
+        };
+
+        var result = await _userManager.CreateAsync(admin, _config.AdminPassword);
+        if (result.Succeeded)
+            await _userManager.AddToRoleAsync(admin, "Admin");
+    }
+}

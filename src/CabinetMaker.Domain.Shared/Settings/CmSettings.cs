@@ -1,0 +1,9 @@
+﻿namespace CabinetMaker.Domain.Shared.Settings;
+
+public class CmSettings
+{
+    public static string Key = "CabinetMaker";
+    public string DatabaseProvider { get; set; } = string.Empty;
+    public CmDbSettings ConnectionStrings { get; set; } = default!;
+    public CmSeedSettings Seed { get; set; } = new();
+}

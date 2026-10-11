@@ -1,0 +1,14 @@
+using Microsoft.Extensions.DependencyInjection;
+
+namespace CabinetMaker.BRL.Extensions;
+
+public static class BrlServiceExtensions
+{
+    public static IServiceCollection AddBusinessLayer(
+        this IServiceCollection services)
+    {
+        // BRL services registered here as they are built
+
+        return services;
+    }
+}

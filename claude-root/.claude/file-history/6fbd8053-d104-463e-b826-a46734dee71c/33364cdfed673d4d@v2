@@ -1,0 +1,2 @@
+@using CabinetMaker.Web.Components.Account.Shared
+@attribute [ExcludeFromInteractiveRouting]

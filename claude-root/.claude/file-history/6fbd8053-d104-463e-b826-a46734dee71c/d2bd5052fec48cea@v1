@@ -1,0 +1,11 @@
+﻿using Microsoft.Extensions.DependencyInjection;
+
+namespace CabinetMaker.Web.Views.Extensions;
+
+public static class ViewServiceExtension
+{
+    public static IServiceCollection AddViewLayer(this IServiceCollection services)
+    {
+        return services;
+    }
+}

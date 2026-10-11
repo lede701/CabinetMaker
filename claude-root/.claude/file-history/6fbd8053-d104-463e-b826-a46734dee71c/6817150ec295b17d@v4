@@ -1,0 +1,79 @@
+﻿
+@*
+<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">CabinetMaker.Web</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="nav flex-column">
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="/auth/test">
+                <span class="bi bi-plus-square-fill-nav-menu" aria-hidden="true"></span> Auth Test
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3 mt-2">
+            <span class="nav-link text-white-50 small text-uppercase">Tools</span>
+        </div>
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="/tools/measurement-converter">
+                <span class="bi bi-rulers-nav-menu" aria-hidden="true"></span> Converter
+            </NavLink>
+        </div>
+    </nav>
+</div>
+
+*@
+<nav class="navbar navbar-expand-lg bg-body-tertiary">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="#">Cabinet Maker</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarSupportedContent">
+            <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                        <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
+                    </NavLink>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="#">Link</a>
+                </li>
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        Tools
+                    </a>
+                    <ul class="dropdown-menu">
+                        <li>
+                            <NavLink class="nav-link" href="/tools/measurement-converter">
+                                <span class="bi bi-rulers-nav-menu" aria-hidden="true"></span> Converter
+                            </NavLink>
+                        </li>
+                    </ul>
+                </li>
+            </ul>
+            <AuthorizeView>
+                <Authorized>
+                    <span class="me-3 text-muted small">@context.User.Identity?.Name</span>
+                    <form method="post" action="/account/logout" class="d-inline">
+                        <AntiforgeryToken />
+                        <input type="hidden" name="returnUrl" value="" />
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">Sign out</button>
+                    </form>
+                </Authorized>
+            </AuthorizeView>
+
+        </div>
+    </div>
+</nav>

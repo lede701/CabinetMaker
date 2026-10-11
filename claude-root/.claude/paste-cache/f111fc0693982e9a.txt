@@ -1,0 +1,20 @@
+[+] Building 0.5s (3/3) FINISHED                                                                                                                                                   docker:desktop-linux
+ => [internal] load build definition from Dockerfile                                                                                                                                               0.0s
+ => => transferring dockerfile: 1.10kB                                                                                                                                                             0.0s
+ => ERROR [internal] load metadata for mcr.microsoft.com/dotnet/sdk:10.0                                                                                                                           0.4s
+ => ERROR [internal] load metadata for mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim                                                                                                          0.4s
+------
+ > [internal] load metadata for mcr.microsoft.com/dotnet/sdk:10.0:
+------
+------
+ > [internal] load metadata for mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim:
+------
+Dockerfile:19
+--------------------
+  17 |         --no-restore
+  18 |
+  19 | >>> FROM mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim AS runtime
+  20 |     WORKDIR /app
+  21 |     EXPOSE 8080
+--------------------
+ERROR: failed to build: failed to solve: mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim: failed to resolve source metadata for mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim: mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim: not found

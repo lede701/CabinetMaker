@@ -1,0 +1,12 @@
+using CabinetMaker.DAL.Context;
+using CabinetMaker.Domain.Entities;
+using Microsoft.Extensions.Logging;
+
+namespace CabinetMaker.DAL.Repositories;
+
+public class MaterialRepository : BaseRepository<CmMaterial>
+{
+    public MaterialRepository(ILogger<MaterialRepository> logger, CmContext context) : base(logger, context)
+    {
+    }
+}

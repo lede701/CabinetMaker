@@ -1,0 +1,3 @@
+# Memory Index
+
+- [Configuration injection pattern](feedback_config_injection.md) — Lower layers never read appsettings; web layer is composition root, passes typed DTOs down

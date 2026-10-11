@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.12" />
+    <PackageReference Include="MySql.EntityFrameworkCore" Version="10.0.9" />
+    <PackageReference Include="Riok.Mapperly" Version="4.3.1" PrivateAssets="all" IncludeAssets="build; analyzers" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CabinetMaker.Domain\CabinetMaker.Domain.csproj" />
+    <ProjectReference Include="..\CabinetMaker.Domain.Shared\CabinetMaker.Domain.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,68 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      DatabaseProvider: MySql
+      ConnectionStrings__DefaultConnection: >-
+        Server=db;Port=3306;Database=cabinetmaker;
+        User=${DB_USER:-cabinetmaker};Password=${DB_PASSWORD:-cabinetmaker_dev};
+        AllowPublicKeyRetrieval=true;SslMode=None;
+      Seed__AdminEmail: ${ADMIN_EMAIL:-admin@cabinetmaker.local}
+      Seed__AdminPassword: ${ADMIN_PASSWORD:-Admin@123!}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dbadmin:
+    image: dbgate/dbgate
+    ports:
+      - "8081:3000"
+    environment:
+      CONNECTIONS: cabinetmaker
+      LABEL_cabinetmaker: CabinetMaker Dev
+      SERVER_cabinetmaker: db
+      PORT_cabinetmaker: 3306
+      USER_cabinetmaker: ${DB_USER:-cabinetmaker}
+      PASSWORD_cabinetmaker: ${DB_PASSWORD:-cabinetmaker_dev}
+      ENGINE_cabinetmaker: mysql@dbgate-plugin-mysql
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_dev}
+      MYSQL_DATABASE: cabinetmaker
+      MYSQL_USER: ${DB_USER:-cabinetmaker}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cabinetmaker_dev}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - -h
+        - localhost
+        - -u
+        - ${DB_USER:-cabinetmaker}
+        - --password=${DB_PASSWORD:-cabinetmaker_dev}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

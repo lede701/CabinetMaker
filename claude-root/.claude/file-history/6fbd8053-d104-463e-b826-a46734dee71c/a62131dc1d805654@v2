@@ -1,0 +1,20 @@
+using CabinetMaker.Domain.Entities;
+using CabinetMaker.Domain.Interfaces.Repositories;
+using System.Linq.Expressions;
+
+namespace CabinetMaker.Domain.Interfaces.Services;
+
+public interface IRecordSuccessionService
+{
+    Task<TDetail?> GetEffectiveAsync<TDetail>(
+        IRepository<TDetail> repo,
+        Expression<Func<TDetail, bool>> parentFilter,
+        DateTime? asOf = null)
+        where TDetail : CmEntityHistory;
+
+    Task<bool> SucceedAsync<TDetail>(
+        IRepository<TDetail> repo,
+        TDetail newDetail,
+        Expression<Func<TDetail, bool>> parentFilter)
+        where TDetail : CmEntityHistory;
+}

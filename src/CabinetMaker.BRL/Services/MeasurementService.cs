@@ -1,0 +1,26 @@
+using CabinetMaker.Domain.Entities;
+using CabinetMaker.Domain.Enums;
+using CabinetMaker.Domain.Interfaces;
+using CabinetMaker.Domain.Interfaces.Repositories;
+using CabinetMaker.Domain.Interfaces.Services;
+
+namespace CabinetMaker.BRL.Services;
+
+public class MeasurementService : IMeasurementService
+{
+    private readonly IRepository<CmUnit> _units;
+
+    public MeasurementService(IUnitOfWork uow)
+    {
+        _units = uow.GetRepository<CmUnit>();
+    }
+
+    public async Task<IEnumerable<CmUnit>> GetLengthUnitsAsync()
+        => await _units.GetAsync(u => u.UnitTypeID == (int)UnitTypeId.Length);
+
+    public decimal Convert(decimal value, CmUnit from, CmUnit to)
+    {
+        if (from.UnitID == to.UnitID) return value;
+        return value * from.BaseMultiplier / to.BaseMultiplier;
+    }
+}

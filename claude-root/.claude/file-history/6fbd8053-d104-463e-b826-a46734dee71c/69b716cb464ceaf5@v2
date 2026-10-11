@@ -1,0 +1,60 @@
+@page "/account/manage/enable-authenticator"
+
+<PageTitle>Configure Authenticator App</PageTitle>
+
+@if (recoveryCodes is not null)
+{
+    <h3 class="mb-3">Two-Factor Authentication Enabled</h3>
+    <div class="alert alert-success">
+        Your authenticator app has been verified and 2FA is now active on your account.
+    </div>
+    <h5>Recovery Codes</h5>
+    <p class="text-muted">Save these codes somewhere safe. Each code can only be used once if you lose access to your authenticator app.</p>
+    <div class="row g-2 mb-4">
+        @foreach (var code in recoveryCodes)
+        {
+            <div class="col-md-4">
+                <code class="d-block border rounded p-2 text-center bg-light">@code</code>
+            </div>
+        }
+    </div>
+    <a href="/account/manage/2fa" class="btn btn-primary">Done</a>
+}
+else
+{
+    <h3 class="mb-3">Configure Authenticator App</h3>
+    <StatusMessage Message="@message" />
+
+    <ol class="mb-4">
+        <li class="mb-3">
+            <p>Download an authenticator app such as
+                <strong>Microsoft Authenticator</strong> or <strong>Google Authenticator</strong>.
+            </p>
+        </li>
+        <li class="mb-3">
+            <p>Scan the QR code below or enter this key manually into your app:</p>
+            <p><kbd class="fs-6">@sharedKey</kbd></p>
+            @if (qrCodeBase64 is not null)
+            {
+                <img src="data:image/png;base64,@qrCodeBase64" alt="QR Code" class="my-2" style="width:200px;height:200px;" />
+            }
+        </li>
+        <li>
+            <p>Once set up, enter the 6-digit code your app generates to verify and activate 2FA.</p>
+            <div class="row">
+                <div class="col-md-5">
+                    <EditForm Model="Input" method="post" OnValidSubmit="OnValidSubmitAsync" FormName="enable-authenticator">
+                        <DataAnnotationsValidator />
+                        <ValidationSummary class="text-danger" role="alert" />
+                        <div class="form-floating mb-3">
+                            <InputText @bind-Value="Input.Code" id="code" class="form-control" autocomplete="off" placeholder="000000" />
+                            <label for="code">Verification Code</label>
+                            <ValidationMessage For="() => Input.Code" class="text-danger" />
+                        </div>
+                        <button type="submit" class="btn btn-primary">Verify & Enable</button>
+                    </EditForm>
+                </div>
+            </div>
+        </li>
+    </ol>
+}

@@ -1,0 +1,6 @@
+Build started at 6:19 AM...
+1>------ Build started: Project: CabinetMaker.Web, Configuration: Debug Any CPU ------
+1>C:\Data\Apps\CabinetMaker\src\CabinetMaker.Web\Components\Routes.razor(6,21,6,115): error RZ9999: The child content element 'Authorized' of component 'AuthorizeView' uses the same parameter name ('context') as enclosing child content element 'NotAuthorized' of component 'AuthorizeRouteView'. Specify the parameter name like: '<Authorized Context="another_name"> to resolve the ambiguity
+1>C:\Data\Apps\CabinetMaker\src\CabinetMaker.Web\Components\Routes.razor(9,21,9,119): error RZ9999: The child content element 'NotAuthorized' of component 'AuthorizeView' uses the same parameter name ('context') as enclosing child content element 'NotAuthorized' of component 'AuthorizeRouteView'. Specify the parameter name like: '<NotAuthorized Context="another_name"> to resolve the ambiguity
+========== Build: 0 succeeded, 1 failed, 4 up-to-date, 0 skipped ==========
+========== Build completed at 6:19 AM and took 01.137 seconds ==========

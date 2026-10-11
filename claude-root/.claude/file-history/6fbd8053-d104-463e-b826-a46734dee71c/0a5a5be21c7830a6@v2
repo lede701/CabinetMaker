@@ -1,0 +1,12 @@
+@page "/login/lockout"
+
+<PageTitle>Account Locked</PageTitle>
+
+<div class="row justify-content-center mt-5">
+    <div class="col-md-5 text-center">
+        <h2 class="mb-3">Account Locked</h2>
+        <div class="alert alert-warning">
+            Your account has been locked due to multiple failed login attempts. Please try again later.
+        </div>
+    </div>
+</div>

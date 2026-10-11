@@ -1,0 +1,13 @@
+﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+
+namespace CabinetMaker.DAL.Context;
+
+public class CmContext : DbContext
+{
+    public CmContext(DbContextOptions<CmContext> options) : base(options)
+    {
+
+    }
+
+}
